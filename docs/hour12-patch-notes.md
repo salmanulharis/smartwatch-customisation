@@ -122,6 +122,29 @@ blank-safe).
 ⇒ **14 frames, `- . / 0 1 2 3 4 5 6 7 8 9 :`**, frame size = one character; the field is
 up to 3 characters wide, so leave ~3 × width of space.
 
+**Exact placement (traced):** caller `0x0085C7CA` passes record x, y, w (frame width,
+`+0x34E`), h. `0x008448BE` formats, then calls the string drawer `0x008435BE` with n = 3; its
+own centring block (`0x008449AC`) is skipped because the gating stack argument is 0.
+- itoa `0x008434FE(v, buf, 3)`: right-aligned, **space-padded**, leading zeros suppressed
+  (5 → `"  5"`, 29 → `" 29"`, 105 → `"105"`). Negatives patched in `0x008448BE`:
+  −3 → `" -3"`, −12 → `"-12"`; no data → `" --"`.
+- `0x008435BE`: b = number of leading spaces (`0x008434E8`), the spaces are stripped,
+  start x0 = **record_x + (b·w) >> 1** (`0x0084363E`), advance = **w** per char, y = record_y,
+  no extra spacing (`obj+0 = x0`, `obj+2 = y`, `obj+8 = w`, `obj+0xA = h`).
+
+**Formula:** for a visible string of n chars (n = 3 − b), char k (0-based) is drawn at
+`x = record_x + ((3 − n)·w >> 1) + k·w`, `y = record_y` — i.e. the string is **centred in a
+3·w field starting at record_x** (centre = record_x + 1.5·w), using the frame width.
+
+| Value | String | Char x positions |
+|---|---|---|
+| 5 | `5` | x + w |
+| 29 | `29` | x + w/2, x + 3w/2 |
+| −3 | `-3` | x + w/2 (`-`), x + 3w/2 |
+| 105 | `105` | x, x + w, x + 2w |
+
+So to centre the reading on screen column C, set **record_x = C − 1.5·w** (not C − w/2).
+
 **Type 22 — unit symbol** (`0x0085C80E`): `ldrb r0,[0x20BE84+0x14D]` → frame index.
 `+0x14D` is set by the `A9` settings handler (`0x00836968`): packet byte 17 = 1 → 0 (°C),
 = 2 → 1 (°F). ⇒ **2 frames: 0 = °C, 1 = °F**. Confidence: medium-high (value written for
@@ -167,7 +190,145 @@ static image, which is why it shows there.
 (0 = empty … 10 = full), same w/h/x/y. No other condition, type, or field is required.
 (`tools/s100_dial.py` `battery_frames()` had the same 5-frame bug.)
 
-## 8. How to use
+## 8. Analog hands (types 1, 2, 3)
+
+Names (onlinedial/ConfigType.java L24, L43, L55): **1 `CONFIG_SHIZHEN_TYPE` = hour hand**,
+**2 `CONFIG_FENZHEN_TYPE` = minute hand**, **3 `CONFIG_MIAOZHEN_TYPE` = second hand**.
+The app's custom-dial builder never creates them (only referenced by the RLE-exclusion range,
+PicUtils.java L554); no `DialCustom` APK asset uses them — they come from downloaded online dials.
+
+**Separate pass after the element loop** — `0x0085D3F6`…`0x0085D8xx` (records scanned at
+`0x0085D4A6`: `cmp r2,#1/#2/#3`). **One image per hand, rotated at runtime** (float math,
+sin/cos helpers `0x00874C5C` / `0x00874CD4`) — not pre-rendered frames.
+
+Angles (radians, constant −π at literal `0x0085D7EC`; 360.0 at `0x0085D7F0`, 1800.0 at
+`0x0085D7F4`), time from settings struct `0x0020BE84` (`+0x96` h, `+0x97` m, `+0x98` s):
+
+```
+hour   = (h % 12)·π/6 + m·π/360      ; includes minutes   (0x0085D3FA–0x0085D444)
+minute = m·π/30 + s·π/1800           ; includes seconds
+second = s·π/30
+```
+(sign negative in screen coordinates = clockwise; 0 = 12 o'clock.)
+
+Per-hand parameters come from the record's **reserved bytes** (record base `+0x34C`):
+
+```
+0085d4c8  ldrb r2,[r0,#0x361] → [sp+0]    ; record byte 21
+0085d4d0  ldrb r2,[r0,#0x362] → [sp+4]    ; record byte 22
+0085d4d8  ldrb r2,[r0,#0x363] → [sp+2]    ; record byte 23
+0085d4e0  if dial width (hdr, +0x340) == record width:  pivot = (w/2, h/2)
+          else:                                         pivot = record (x, y)
+```
+
+Bounding-box code (`0x0085D7B6`…) uses `−byte21`, `byte22 − byte21` and `byte23 / 2`, so
+**[medium]**: byte 21 = distance from the image's top (tip) down to the pivot, byte 22 = image
+height, byte 23 = image width (pivot horizontally at width/2). All three are u8 → hand images
+≤ 255 px. The draw objects for minute/second are given the *hour hand's* pivot
+(`0x0085D68C`, `0x0085D6CA`), so **use the same x/y for all three hands**.
+
+Transparency: hands are composited over the already-drawn face; the rotated blit is expected
+to skip the key colour `0x0000` **[low–medium, not traced]** → paint everything outside the
+hand pure `0x0000` (unlike the other elements, where we avoid `0x0000`). No centre-cap type
+exists; draw a cap in the background (it will sit under the hands).
+
+**Build recipe — mini analog clock in a ~54×66 box at (40,212):** pivot (67,245).
+
+| Field | Hour (type 1) | Minute (type 2) | Second (type 3, optional) |
+|---|---|---|---|
+| record w × h (u16) | 4 × 20 | 4 × 28 | 2 × 30 |
+| x, y (u16) | 67, 245 | 67, 245 | 67, 245 |
+| anim (u16) / frames (u8) | 0 / 1 | 0 / 1 | 0 / 1 |
+| bytes 17–20 | 00 | 00 | 00 |
+| byte 21 (tip→pivot) | 17 | 25 | 25 |
+| byte 22 (height) | 20 | 28 | 30 |
+| byte 23 (width) | 4 | 4 | 2 |
+
+Image: one frame, hand drawn **vertical pointing up**, pivot pixel at (w/2, byte21), RGB565 BE,
+background pixels `0x0000`. Background (type 17) carries the dial ring/ticks and centre dot.
+Second hand redraws every second (power cost) — omit it for the desk clock.
+Confidence: rotation + angle formulas **high**; pivot = record x/y **high**; byte 21/22/23
+meaning **medium**; `0x0000` transparency **low–medium** — verify with one test upload
+(e.g. make the hand image slightly longer than the box and check alignment).
+
+### Analog hands — multiple sets
+
+1. **Only one set exists; the last record of each type wins.** The scan loop
+   (`0x0085D49E`…`0x0085D5D4`, all records up to the count at `+0xA3B`) writes every type-1
+   record into the *same* slots: image pointer → draw object `+0x24`, params → `[sp+0/2/4]`,
+   pivot → `[sp+0x14/0x16]` (`0x0085D4B8`–`0x0085D4FC`). Type 2 → `+0x50`, `[sp+6/8/0xA]`,
+   `[sp+0x18/0x1A]`; type 3 → `+0x94`, `[sp+0xC/0xE/0x10]`, `[sp+0x1C/0x1E]`. Later records
+   overwrite earlier ones, and only one draw object per hand type is filled (`0x0085D63A`…).
+2. **Every hand is drawn about the hour hand's pivot.** The pivot fields of all three draw
+   objects (`+0x2C/+0x2E`, `+0x70/+0x72` at `0x0085D68C`, `+0xB4/+0xB6` at `0x0085D6CA`) are
+   stored from the hour pivot `[sp+0x14/0x16]`. The per-hand pivots are only used by the
+   bounding-box/dirty-rect loop (`0x0085D78A`…, `sb = sp+0x14`, indexed per hand), so a
+   minute-hand record with a different x/y gets the wrong dirty rectangle (smearing or
+   clipping) as well as the wrong pivot.
+3. Rotation centre in the image = (byte23 / 2, byte21). The bounding box is the rectangle
+   x ∈ [−byte23/2, +byte23/2], y ∈ [−byte21, byte22 − byte21], rotated. So a square image with
+   byte21 = size//2, byte22 = byte23 = size **does** rotate about its centre; there is no
+   narrow-hand requirement apart from u8 sizes (≤ 255, and byte23 + 4 is stored in a byte at
+   `+0x1C`). Keep byte22/23 equal to record h/w; the blit uses the record w/h for the pixel
+   stride. **The runtime always adds the current local angle**, so hand art must point to
+   12 o'clock. Art that is "pre-rotated to the current time" ends up rotated twice.
+   Pre-rotation is only valid as a **fixed offset**.
+   Pivot rule (`0x0085D4E0`): if record w equals dial width (240), pivot = (w/2, h/2), else
+   pivot = record (x, y).
+4. **Feasible designs.**
+   - (a) Several world clocks: **not possible** with stock firmware. There is one hand set,
+     every time element reads the same local time, and no element takes an offset. It would
+     need a firmware patch (per-record offset plus a draw-object array).
+   - (b) **One extra-timezone analog clock + local digital time: possible.**
+     - Use exactly one type-1, one type-2 (and optionally one type-3) record, all with the
+       same x/y pivot.
+     - Pre-rotate the hand art by the zone offset Δ = hours + minutes:
+       hour image rotated by Δh·30° + Δm·0.5°, minute image by Δm·6°.
+     - The runtime then adds local time, so the hands show remote time.
+     - Square images, with byte21 = size//2 and byte22 = byte23 = size.
+     - Local time digital via types 57–60 + 16. Label the zone in the background.
+     - Rebuild and re-upload when DST changes.
+   Confidence: slot/pivot behaviour **high** (direct from the stores); rotation centre
+   **medium–high**; fixed-offset trick **medium**, verify once on the watch.
+
+## 9. Whole-value time elements
+
+**None of the stock time elements uses the whole value as a frame index.** All are digit
+strings or single digits drawn from a **14-frame digit sprite** (`- . / 0–9 :`):
+
+| Type | Handler | What it draws |
+|---|---|---|
+| 4 timehour | `0x0085C19A` → `0x00843680` mode 1 | 2-char zero-padded `"HH"` (12 h flag honoured, same quirk: 0 → `00`, 12 → `12`), left-aligned at record x, advance w (`0x008435BE` mode 2) |
+| 5 timemin | `0x0085C29E` → `0x00843680` mode 2 | `"MM"`, same placement |
+| 11 timemonth / 13 timeday | `0x0085C49C` / `0x0085C582` → `0x00843680` modes 3/4 | `"MM"` / `"DD"` |
+| 25 stepnum | `0x0085C848` → `0x00843FD8` | step-count string |
+| 6 / 61 / 62 seconds | `0x0085C32A`; `0x0085D316`/`0x0085D362` | single digits `s/10 + 3`, `s%10 + 3` |
+| 57–60 | `0x0085D2CE…` | single digits (tens/units) |
+
+(`0x00843680` builds the string from `+0x96/+0x97` or `+0x94/+0x95` and calls `0x008435BE`
+with frame base `data + 6·w·h` = frame `'0'`.) ⇒ a word clock with **one image per hour and per
+minute value is not possible with stock elements.** Without patching, the closest is
+words-per-digit: type 59 frames as tens words (oh/ten/twenty/…/fifty, 6 used) + type 60 as
+units words (one…nine); hours 57/58 can't give eleven/twelve cleanly.
+
+**Minimal firmware patch to make 57 and 59 whole-value** (verified with Capstone; at switch
+entry `r1` = `0x0020BE84`, as the minute cases already assume):
+
+| Addr (file off = addr − 0x0080E000 + 0x200) | Original | New | Effect |
+|---|---|---|---|
+| `0x0085D2CE` | `07 4B` `ldr r3,[pc,#0x1c]` | `0B 46` `mov r3,r1` | |
+| `0x0085D2D4` | `18 3B` `subs r3,#0x18` | `96 33` `adds r3,#0x96` | type 57 frame = **raw hour 0–23 + 3** |
+| `0x0085D304` | `09 E0` `b 0x85d31a` | `0C E0` `b 0x85d320` | type 59 frame = **minute 0–59 + 3** |
+
+Then type 57 needs **27 frames** (0–2 unused, frame h + 3 for hour h; draw 12-hour words in
+the art, e.g. frames for 0 and 12 both "twelve") and type 59 needs **63 frames** (m + 3).
+Don't place 58/60 (they still show units digits). AM/PM via type 16 still works.
+Caveats: this changes 57/59 for **every** dial (stock dials using them would break); size —
+63 + 27 frames must fit 1 MB (e.g. 140×36 px per frame ≈ 10 KB → ~900 KB total; tight, use
+smaller word images). Confidence: element analysis **high**; patch correctness **high**
+(4 bytes, register use verified), untested on the watch. Re-hash + version bump as usual.
+
+## 10. How to use
 
 ```
 python tools/s100.py …   # bind first (S100 class does it), then write A0 01 02 on 33f1

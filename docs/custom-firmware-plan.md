@@ -5,8 +5,9 @@ future session (human or AI). Facts and evidence live in [TechLife-S100.md](Tech
 (§12b chip/SDK/layout, "Route B" stock-patching notes); this file is the plan and status.
 
 **Status (2026-10-29):** waiting for Realtek's reply to a request for the legacy RTL8762D SDK
-(matching ROM patch rev 239). Phase 0 done. **Track B phase B1 PASSED** — re-hashed stock image
-(revision 1320) installed and running (`ffd4 = 00 80 52 00`). Next: B2 (screen-timeout patch).
+(matching ROM patch rev 239). Phase 0 done. **Track B phase B2 PASSED** (v1322 installed).
+**B5 world-clock patch built** (v1323) — 130-byte Thumb-2 handler at 0x89491C renders dial
+element type 71 as an offset clock digit (4 cities, emulator-tested). Ready to flash + upload `world.bin`.
 
 ---
 
@@ -204,10 +205,23 @@ python tools\s100_gatt_dump.py     # ffd4 should read 00 80 52 00
 - **Exit:** new look across screens.
 
 ### B5. Custom screens (code injection)
-- Find free flash in the app slot; compile our C (SDK v1.1.0 compiler, fixed address) that calls
-  stock draw/timer functions found by reverse engineering; hook one screen's handler to ours.
-- Start with a desk-clock screen, then nav/music/notification screens fed by the existing UTE
-  commands (`tools/s100.py` already sends nav text, music title, weather).
+- Find free flash in the app slot; write ARM Thumb-2 at a fixed address that calls stock
+  draw/timer functions found by reverse engineering; hook one screen's handler to ours.
+- **First target: world-clock digits (dial element type 71).**
+  Dial element dispatch at `0x85D290` (cascading CMP/BEQ for types 57-70); time struct pointer in
+  r1 (`+0x96` hour, `+0x97` minute, `+0x66` 12 h flag). The record parser at `0x83B2E6` stops at
+  the first type > 71 (`cmp r0,#0x47; bhi`) and caps a dial at 71 elements, so **all world
+  digits use type 71** (stock never uses it). Record reserved bytes (RAM `r4+0x35D…`): [0]=0,
+  [1:3]=signed LE16 minute offset, [3]=digit position (hour tens/units, minute tens/units).
+  Hook replaces `ldrh.w r0,[r4,#0x34c]` with `b.w 0x89491C`; the 130-byte handler in zero padding
+  computes `(h*60+m+offset) mod 1440`, applies 12 h like stock (`h>12 → h-12`), picks the digit
+  and jumps to the stock frame-select at `0x85D320`; other types fall through to `0x85D294`.
+  Verified in Unicorn: 4032 cases (both 12/24 h, 7 offsets, all hours, 4 positions), stack balanced.
+  Mod `b5_worldclock` in `tools/s100_mods.py` (cumulative with B2) →
+  `research/mods/b5_worldclock_v1323.bin`. Face: `tools/dial_world.py` (2×2 grid Mumbai /
+  New York / Dubai / London; offsets computed for the build date incl. US/UK DST, so rebuild and
+  re-upload after a DST change).
+- Next: nav/music/notification screens fed by UTE commands (`tools/s100.py`).
 - **Exit:** custom screens reachable from the watch, fed live from the PC/phone.
 
 Track B limits: bound to the stock architecture; large UI changes get hard. If Track A becomes
@@ -241,3 +255,9 @@ available, move to it after B1 (B1's result still matters: it shows non-vendor i
 - 2026-10-29 — Checked `sbee2-sdk-gcc-v1.0.0` and `SBEE2-SDK-UPPERSTACK-IMAGE-V1.0.0`: ROM match,
   but all need a separate upperstack image. Driver switched to buffer-check streaming
   (per-buffer ack + retry). **B1 passed**: modified stock image v1320 installed over BLE.
+- 2026-10-29 — **B5 world-clock patch built.** Reverse-engineered dial element type dispatch at
+  `0x85D290`, time struct at `0x0020BE84`, found free space at `0x89491C`. Designed and assembled
+  130-byte Thumb-2 handler for world-clock digits. First draft used types 71-82, but the dial
+  parser drops everything after the first type > 71, so it was reworked to type 71 + digit
+  position in reserved[3]; noon-in-12h bug fixed. World dial redesigned to a 2×2 city grid. Fixed `s100_dial.py` CLI argument parsing (positional
+  `design` arg was being parsed as output path). Ready for flash + dial upload.

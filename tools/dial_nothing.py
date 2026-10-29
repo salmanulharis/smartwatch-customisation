@@ -71,6 +71,17 @@ SMALL = {
 }
 
 
+def battery_dots(level: int, n: int) -> int:
+    """Dots to light for firmware battery level (= ceil(%/10), 0..10) on an n-dot gauge.
+
+    Uses the middle of the 10 % step (level 6 = 51-60 % -> 55.5 %) and rounds, so 55 % shows
+    half the dots instead of rounding up. Any charge > 0 keeps at least one dot lit.
+    """
+    if level <= 0:
+        return 0
+    return max(1, min(n, round((level * 10 - 4.5) * n / 100)))
+
+
 class Canvas:
     def __init__(self, w: int, h: int):
         self.w, self.h = w, h
@@ -174,7 +185,7 @@ def battery_frames():
 
     # firmware picks frame ceil(battery%/10) → 11 frames (0 … 100 %), no bounds check
     def draw(level):
-        lit = -(-level * 4 // 10)               # ceil: 1-2→1, 3-5→2, 6-7→3, 8-10→4
+        lit = battery_dots(level, 4)
         on = RED if level <= 2 else MINT
 
         def f(c):
@@ -229,10 +240,11 @@ def _cloud(d, s, top=0.3):
     d.rectangle((0.22 * s, (top + 0.27) * s, 0.82 * s, (top + 0.42) * s), fill=255)
 
 
-def _drops(d, s, n, y0=0.78):
+def _drops(d, s, n, y0=0.72):
+    """Rain drops big enough to read on small icons (were ~2x3 px at 22 px)."""
     for k in range(n):
-        x = 0.2 + k * (0.6 / max(n - 1, 1))
-        d.ellipse(((x - 0.04) * s, y0 * s, (x + 0.04) * s, (y0 + 0.16) * s), fill=255)
+        x = 0.25 + k * (0.5 / max(n - 1, 1))
+        d.ellipse(((x - 0.065) * s, y0 * s, (x + 0.065) * s, (y0 + 0.24) * s), fill=255)
 
 
 def _lines(d, s, wavy=False):
@@ -258,7 +270,7 @@ def weather_icon_frames():
             [(0.55 * s, 0.6 * s), (0.38 * s, 0.82 * s), (0.5 * s, 0.82 * s), (0.42 * s, 1.0 * s),
              (0.66 * s, 0.74 * s), (0.54 * s, 0.74 * s)], fill=255))]),                 # 5 thunder
         dot_icon([(WHITE, cloud()), (BLUE, lambda d, s: _drops(d, s, 2)),
-                  (WHITE, lambda d, s: d.ellipse((0.46 * s, 0.8 * s, 0.56 * s, 0.9 * s), fill=255))]),  # 6 sleet
+                  (WHITE, lambda d, s: d.ellipse((0.41 * s, 0.74 * s, 0.59 * s, 0.92 * s), fill=255))]),  # 6 sleet
         dot_icon([(WHITE, cloud()), (BLUE, lambda d, s: _drops(d, s, 2))]),              # 7 light rain
         dot_icon([(GRAY, cloud()), (BLUE, lambda d, s: _drops(d, s, 4))]),               # 8 heavy rain
         dot_icon([(WHITE, cloud()), (WHITE, lambda d, s: [d.ellipse(
@@ -315,7 +327,7 @@ def layout():
         (8, 132, 230, battery_frames()),
         (20, 18, 215, weather_icon_frames()),
         # temperature: firmware centres up to 3 chars on this element
-        (21, TEMP_CX - 8, 223, temp_digit_frames()),
+        (21, TEMP_CX - 23, 223, temp_digit_frames()),
         (22, TEMP_CX + 18, 220, degree_frames()),
     ]
     return els

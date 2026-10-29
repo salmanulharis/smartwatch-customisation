@@ -211,6 +211,13 @@ Data:     colon RGB565BE | background RGB565BE | 14 digit frames "-./0123456789:
 Upload: 203 690 bytes → 846 packets of 241 bytes (`27 00 00 …` … `27 03 4D …`),
 49 waits for `26 03 04`, then 3 s pause and `26 03 00`.
 
+## 6b. Upload size quirk (found on the watch 2026-10-29)
+
+A valid 524 190-byte dial (size mod 4096 = 3998) failed every upload with `26 03 01`
+("CRC check failed") although its CRC was correct; the same file with 200 trailing zero bytes
+(size and CRC updated) uploaded fine. Files whose last 4 KB sector is within one 241-byte
+packet of full trip the watch. `tools/s100_dial.py build` now pads such files. **[confirmed]**
+
 ## 7. Open gaps
 
 1. Whether the watch requires a type-10 preview, and its size for 240×280 (§5).
@@ -221,3 +228,17 @@ Upload: 203 690 bytes → 846 packets of 241 bytes (`27 00 00 …` … `27 03 4D
 5. Activation after upload (§4) and how to return to a stock dial (probably via the watch's
    dial menu).
 6. RLE format for compatibility level ≥ 2 (not needed here).
+
+## Firmware limits and the type-71 world-clock extension
+
+- The record parser (app `0x83B2E6`, stock v1319) copies records until type 0 **or the first type
+  above 71**, and at most 71 records. Anything after a type > 71 is silently dropped.
+- The renderer is tighter: it fills a draw list of **34 sprites** per frame (`cmp r6,#0x21; bhi`
+  at `0x85D3DC`; multi-character elements such as temperature use one slot per character).
+  Elements past that are skipped, and since records are sorted by type, the highest types are
+  lost first. Bake anything static (colons, separators, units) into the background.
+- Type 71 is unused by stock. With firmware mod `b5_worldclock` (v1323+, see
+  custom-firmware-plan.md B5) it renders a world-clock digit: 14-frame digit sprite like 57-60,
+  reserved[0] = 0, reserved[1:3] = signed LE16 minute offset from the watch's local time,
+  reserved[3] = digit position (0 hour tens, 1 hour units, 2 minute tens, 3 minute units).
+  12 h mode follows the stock rule (hour > 12 → hour − 12). Used by `tools/dial_world.py`.
