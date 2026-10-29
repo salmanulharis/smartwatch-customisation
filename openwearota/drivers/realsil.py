@@ -31,6 +31,8 @@ import asyncio
 import struct
 from pathlib import Path
 
+from ..aes import AES256ECB
+
 # ?? GATT UUIDs (DFU / OTA mode) ?????????????????????????????????????????????
 
 DFU_SERVICE_UUID     = "00006287-3c17-d293-8e48-14fe2e4da212"
@@ -53,6 +55,8 @@ OP_ACTIVE_IMAGE_RESET           = 0x04  # activate + reboot  (1 byte)
 OP_RESET                        = 0x05  # abort / reset  (1 byte)
 OP_REPORT_RECEIVED_IMAGE_INFO   = 0x06  # query current image info  (3-byte: opcode + sig LE)
 OP_CONNECTION_PARAMETER_UPDATE  = 0x07  # request faster conn params  (9-byte payload)
+OP_BUFFER_CHECK_ENABLE          = 0x09  # enable buffer-check mode  (1-byte payload)
+OP_REPORT_BUFFER_CRC            = 0x0A  # host→device buffer CRC report  (5-byte payload)
 
 # ?? Notification response byte (byte 0 of every notification) ???????????????
 #
@@ -64,19 +68,21 @@ NOTIFY_RESPONSE_CODE = 0x10  # responseType that marks a valid control-point rep
 # ?? DFU status codes (byte[2] of notifications) ?????????????????????????????
 
 DFU_STATUS_SUCCESS              = 0x01
-DFU_STATUS_NOT_SUPPORTED        = 0x02
-DFU_STATUS_INVALID_PARAM        = 0x03
-DFU_STATUS_OPERATION_FAILED     = 0x04
-DFU_STATUS_DATA_SIZE_EXCEEDS    = 0x05
-DFU_STATUS_CRC_ERROR            = 0x06
+DFU_STATUS_INVALID_PARAM        = 0x02
+DFU_STATUS_OPERATION_FAILED     = 0x03
+DFU_STATUS_DATA_SIZE_EXCEEDS    = 0x04
+DFU_STATUS_CRC_ERROR            = 0x05
+DFU_STATUS_BUFFER_CHECK_ERROR   = 0x06
+DFU_STATUS_NOT_SUPPORTED        = 0xFE
 
 DFU_STATUS_NAMES = {
     DFU_STATUS_SUCCESS:          "SUCCESS",
-    DFU_STATUS_NOT_SUPPORTED:    "NOT_SUPPORTED",
     DFU_STATUS_INVALID_PARAM:    "INVALID_PARAM",
     DFU_STATUS_OPERATION_FAILED: "OPERATION_FAILED",
     DFU_STATUS_DATA_SIZE_EXCEEDS:"DATA_SIZE_EXCEEDS_LIMIT",
     DFU_STATUS_CRC_ERROR:        "CRC_ERROR",
+    DFU_STATUS_BUFFER_CHECK_ERROR:"BUFFER_CHECK_LENGTH_ERROR",
+    DFU_STATUS_NOT_SUPPORTED:    "NOT_SUPPORTED",
 }
 
 # ?? Connection parameter update constants (from DfuService.java) ?????????????
@@ -110,6 +116,32 @@ BIN_HEADER_SIZE = 12
 
 MAX_PACKET_SIZE = 20
 
+# Big-image skip: DfuService.java skips body bytes 104,000–143,360 for images > 100 KB.
+BIG_IMAGE_THRESHOLD = 100 * 1024          # 102,400 bytes (file size including header)
+BIG_IMAGE_SKIP_FROM = 104000              # body byte offset where skip begins
+BIG_IMAGE_SKIP_TO   = 140 * 1024          # 143,360 = body byte offset where skip ends
+
+# MP header: some firmware files have a 512-byte "MP header" prepended before
+# the actual BinHeader.  Detected by first three bytes == 01 00 02.
+MP_HEADER_SIZE = 512
+MP_HEADER_MAGIC = bytes([0x01, 0x00, 0x02])
+
+# Default AES-256 key from Realtek SDK, with bytes 5–10 replaced by ASCII "UTE_RK"
+# (used by realme Fit / UTE-based companion apps).
+REALSIL_DEFAULT_AES_KEY = bytes([
+    0x4E, 0x46, 0xF8, 0xC5, 0x09, 0x55, 0x54, 0x45,
+    0x5F, 0x52, 0x4B, 0x0C, 0xD1, 0xF6, 0x10, 0xFB,
+    0x1F, 0x67, 0x63, 0xDF, 0x80, 0x7A, 0x7E, 0x70,
+    0x96, 0x0D, 0x4C, 0xD3, 0x11, 0x8E, 0x60, 0x1A,
+])
+
+REALSIL_STOCK_AES_KEY = bytes([
+    0x4E, 0x46, 0xF8, 0xC5, 0x09, 0x2B, 0x29, 0xE2,
+    0x9A, 0x97, 0x1A, 0x0C, 0xD1, 0xF6, 0x10, 0xFB,
+    0x1F, 0x67, 0x63, 0xDF, 0x80, 0x7A, 0x7E, 0x70,
+    0x96, 0x0D, 0x4C, 0xD3, 0x11, 0x8E, 0x60, 0x1A,
+])
+
 
 # ?? Bin header parser ????????????????????????????????????????????????????????
 
@@ -122,6 +154,8 @@ class BinHeader:
     def __init__(self, raw: bytes) -> None:
         if len(raw) < BIN_HEADER_SIZE:
             raise ValueError(f"BIN header too short: {len(raw)} < {BIN_HEADER_SIZE}")
+        # Same 12 bytes as T_IMG_CTRL_HEADER_FORMAT: "signature" is ctrl_flag
+        # and "version" is the image_id the DFU commands must carry.
         (self.offset, self.signature, self.version,
          self.checksum, self.length) = struct.unpack_from("<HHHHH", raw, 0)
         self.ota_flag   = raw[10]
@@ -135,6 +169,22 @@ class BinHeader:
             f"ver=0x{self.version:04x}, chk=0x{self.checksum:04x}, "
             f"body={self.body_size}B, ota_flag=0x{self.ota_flag:02x})"
         )
+
+
+# ?? XOR CRC for buffer-check protocol ????????????????????????????????????????
+
+def xor_crc16(data: bytes) -> int:
+    """XOR-based 16-bit CRC used by Realtek buffer-check protocol.
+
+    XOR every little-endian 16-bit word, then byte-swap the result.
+    Translated from BaseDfuTask.java lines 445-451.
+    """
+    crc = 0
+    for i in range(0, len(data) - 1, 2):
+        crc ^= data[i] | (data[i + 1] << 8)
+    if len(data) % 2:
+        crc ^= data[-1]
+    return ((crc & 0xFF) << 8) | ((crc >> 8) & 0xFF)
 
 
 # ?? Command builders ?????????????????????????????????????????????????????????
@@ -157,14 +207,16 @@ def build_report_image_info(signature: int) -> bytes:
     return struct.pack("<BH", OP_REPORT_RECEIVED_IMAGE_INFO, signature & 0xFFFF)
 
 
-def build_start_dfu(hdr: BinHeader, update_offset: int = 0) -> bytes:
+def build_start_dfu(
+    hdr: BinHeader,
+    update_offset: int = 0,
+    *,
+    aes_key: bytes | None = None,
+) -> bytes:
     """17-byte START_DFU command (opcode 0x01).
 
-    The 16 metadata bytes (bytes 1-16) are AES-256-ECB encrypted in the
-    original SDK.  OpenWearOTA does *not* implement AES encryption — see
-    DOCUMENTATION.md ?7.3 for details.  This function builds the *plaintext*
-    payload; if your device requires encryption you must supply the AES key
-    and encrypt externally.
+    The 16 metadata bytes (bytes 1–16) are AES-256-ECB encrypted when an
+    ``aes_key`` is provided (mandatory for protocol type 0x12 / UTE devices).
     """
     payload = struct.pack(
         "<HHHHHBB",
@@ -175,20 +227,22 @@ def build_start_dfu(hdr: BinHeader, update_offset: int = 0) -> bytes:
         hdr.length     & 0xFFFF,
         hdr.ota_flag,
         hdr.reserved_8,
-    )  # 10 bytes
-    payload += b"\x00" * 4  # 4 AES-padding zeros (bytes 11-14 in Java)
-    # prepend opcode, trim to 17 bytes total
+    )  # 12 bytes
+    payload += b"\x00" * 4  # pad to 16 bytes
+    if aes_key is not None:
+        cipher = AES256ECB(aes_key)
+        payload = cipher.encrypt_block(payload[:16])
     return bytes([OP_START_DFU]) + payload[:16]
 
 
 def build_receive_fw_image(signature: int, update_offset: int) -> bytes:
     """7-byte RECEIVE_FW_IMAGE command (opcode 0x02).
 
-    update_offset == 0 means the whole image (starting after the 12-byte
-    header); the Java code substitutes 12 for the offset in that case.
+    For icType > 3 (RTL8762C), offset 0 means "send from the beginning,
+    including the 12-byte BinHeader in the data stream".  The SDK passes the
+    raw mImageUpdateOffset (0 for fresh, device-reported value for resume).
     """
-    actual_offset = update_offset if update_offset != 0 else BIN_HEADER_SIZE
-    return struct.pack("<BHI", OP_RECEIVE_FW_IMAGE, signature & 0xFFFF, actual_offset)
+    return struct.pack("<BHI", OP_RECEIVE_FW_IMAGE, signature & 0xFFFF, update_offset)
 
 
 def build_validate(signature: int) -> bytes:
@@ -212,36 +266,47 @@ async def run_realsil_upgrade(
     *,
     verbose: bool = False,
     limit_function: bool = False,
+    aes_key: bytes | None = REALSIL_DEFAULT_AES_KEY,
 ) -> bool:
     """OTA-flash a Realsil RTL876x device.
 
     Parameters
     ----------
     client:
-        A connected ``bleak.BleakClient``.  The caller should already have
-        connected to the device.
+        A connected ``bleak.BleakClient``.
     firmware_path:
         Path to the Realsil ``.bin`` firmware file (with 12-byte header).
     verbose:
         Print raw notification bytes for debugging.
     limit_function:
-        ``True`` ? device is already in DFU mode (skip phase-1 handover).
-        ``False`` ? attempt phase-1 handover first (writes enter-OTA to normal
-        firmware, then caller must re-connect to DFU-mode device).  In bleak
-        this almost always requires the caller to handle the reconnect loop
-        externally; see DOCUMENTATION.md ?7.4.
+        ``True`` — device is already in DFU mode (skip phase-1 handover).
+        ``False`` — attempt phase-1 handover first.
+    aes_key:
+        AES-256 key for encrypting the START_DFU metadata and firmware body.
+        Defaults to ``REALSIL_DEFAULT_AES_KEY`` (UTE variant).  Pass ``None``
+        to disable encryption (only works on devices that accept plaintext).
     """
     raw_firmware = firmware_path.read_bytes()
-    if len(raw_firmware) < BIN_HEADER_SIZE:
+
+    # Detect and skip MP header (512-byte prefix starting with 01 00 02).
+    img_offset = 0
+    if (len(raw_firmware) >= MP_HEADER_SIZE + BIN_HEADER_SIZE
+            and raw_firmware[:3] == MP_HEADER_MAGIC):
+        img_offset = MP_HEADER_SIZE
+        if verbose:
+            print(f"[*] MP header detected — BinHeader at offset {img_offset}")
+
+    if len(raw_firmware) < img_offset + BIN_HEADER_SIZE:
         print(f"[!] File too small to contain Realsil header ({len(raw_firmware)} bytes).")
         return False
 
-    hdr = BinHeader(raw_firmware)
+    hdr = BinHeader(raw_firmware[img_offset:])
     print(f"[*] {hdr}")
 
-    body = raw_firmware[BIN_HEADER_SIZE : BIN_HEADER_SIZE + hdr.body_size]
-    if len(body) < hdr.body_size:
-        print(f"[!] File body shorter than header claims ({len(body)} < {hdr.body_size} bytes).")
+    body_start = img_offset + BIN_HEADER_SIZE
+    body = raw_firmware[body_start:]
+    if len(body) == 0:
+        print("[!] Firmware file has no body after header.")
         return False
 
     # ?? Phase 1: handover (normal firmware ? DFU mode) ????????????????????
@@ -265,7 +330,9 @@ async def run_realsil_upgrade(
         return False
 
     # ?? Phase 2: DFU transfer ?????????????????????????????????????????????
-    return await _run_dfu_transfer(client, hdr, body, verbose=verbose)
+    return await _run_dfu_transfer(
+        client, hdr, body, verbose=verbose, aes_key=aes_key,
+    )
 
 
 # ?? Phase 1 helper ???????????????????????????????????????????????????????????
@@ -302,7 +369,14 @@ async def _enter_ota_mode(client, *, verbose: bool) -> bool:
 
 # ?? Phase 2 helper ???????????????????????????????????????????????????????????
 
-async def _run_dfu_transfer(client, hdr: BinHeader, body: bytes, *, verbose: bool) -> bool:
+async def _run_dfu_transfer(
+    client,
+    hdr: BinHeader,
+    body: bytes,
+    *,
+    verbose: bool,
+    aes_key: bytes | None = None,
+) -> bool:
     notif_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
     def _handler(_sender, data: bytes) -> None:
@@ -310,10 +384,14 @@ async def _run_dfu_transfer(client, hdr: BinHeader, body: bytes, *, verbose: boo
 
     await client.start_notify(DFU_CONTROL_PT_UUID, _handler)
 
-    packet_size = min(
-        MAX_PACKET_SIZE,
-        getattr(client, "mtu_size", 23) - 3,
-    )
+    ble_mtu = getattr(client, "mtu_size", 23)
+    raw_pkt = ble_mtu - 3
+    # Without buffer check the device flushes its temp buffer only when it
+    # holds exactly (BUF - BUF % 20) bytes and resets on overflow, so the
+    # packet size must divide that.  1020 divides it for 1K/2K/4K buffers.
+    packet_size = max(d for d in range(20, max(raw_pkt, 20) + 1) if 1020 % d == 0)
+    buf_check_max = 0
+    buf_check_mtu = 0
 
     async def send_cp(data: bytes) -> None:
         await client.write_gatt_char(DFU_CONTROL_PT_UUID, data, response=True)
@@ -362,11 +440,33 @@ async def _run_dfu_transfer(client, hdr: BinHeader, body: bytes, *, verbose: boo
             return _check_notif(raw, expect_op, what)
 
     try:
+        # ?? Step 0: buffer-check mode (opcode 0x09) ????????????????????????
+        # Reply: 10 09 <enabled> <buffer size LE16> <device MTU LE16>.
+        # With buffer check the device verifies and writes each buffer and
+        # acks it, which large images need.
+        await send_cp(bytes([OP_BUFFER_CHECK_ENABLE]))
+        try:
+            while True:
+                raw = await wait_notif(timeout=5.0)
+                if verbose:
+                    print(f"    notif (BufferCheckEn): {raw.hex()}")
+                if len(raw) >= 2 and raw[1] == OP_BUFFER_CHECK_ENABLE:
+                    break
+        except asyncio.TimeoutError:
+            raw = b""
+        if len(raw) >= 7 and raw[2] == 1:
+            buf_check_max = struct.unpack_from("<H", raw, 3)[0]
+            buf_check_mtu = struct.unpack_from("<H", raw, 5)[0]
+            mtu = min(ble_mtu, buf_check_mtu) if buf_check_mtu else ble_mtu
+            packet_size = max(16, ((mtu - 3) // 16) * 16)
+            print(f"[*] Buffer check on: buffer {buf_check_max} B, "
+                  f"packet {packet_size} B (MTU {mtu})")
+        else:
+            print(f"[*] Packet size: {packet_size} (MTU {ble_mtu}, no buffer check)")
+
         # ?? Step 1: request faster connection parameters ?????????????????
         print("[*] Requesting faster connection parameters…")
         await send_cp(build_conn_param_update())
-        # The SDK does NOT wait for a notification here — connection-parameter
-        # updates are fire-and-forget.  Drain any stray notification.
         try:
             raw = await asyncio.wait_for(notif_queue.get(), timeout=1.5)
             if verbose:
@@ -376,87 +476,163 @@ async def _run_dfu_transfer(client, hdr: BinHeader, body: bytes, *, verbose: boo
 
         # ?? Step 2: query existing image info (resume support) ???????????
         print("[*] Querying device image info…")
+        await send_cp(build_report_image_info(hdr.version))
+        while True:
+            raw_info_notif = await wait_notif(timeout=10.0)
+            if verbose:
+                print(f"    notif (ImageInfo): {raw_info_notif.hex()}")
+            if len(raw_info_notif) >= 2 and raw_info_notif[1] == OP_CONNECTION_PARAMETER_UPDATE:
+                continue
+            break
+        if not _check_notif(raw_info_notif, OP_REPORT_RECEIVED_IMAGE_INFO, "ReportImageInfo"):
+            return False
+
+        # Notification: 10 06 status | version (LE32) | offset (LE32)
+        original_version = 0
+        device_offset    = 0
+        if len(raw_info_notif) >= 11:
+            original_version = struct.unpack_from("<I", raw_info_notif, 3)[0]
+            device_offset    = struct.unpack_from("<I", raw_info_notif, 7)[0]
+        print(
+            f"[*] Device image version: 0x{original_version:08x}  "
+            f"reported offset: {device_offset}"
+        )
+        # Bee2 resets cur_offset to 0 on this command (no re-OTA support),
+        # so always start a fresh transfer.
+        update_offset = 0
+
+        # ?? Step 3: START_DFU ????????????????????????????????????????????
+        print("[*] Sending START_DFU (full image)…")
         ok = await send_and_ack(
-            build_report_image_info(hdr.signature),
-            OP_REPORT_RECEIVED_IMAGE_INFO,
-            "ReportImageInfo",
+            build_start_dfu(hdr, update_offset, aes_key=aes_key),
+            OP_START_DFU,
+            "StartDfu",
         )
         if not ok:
             return False
 
-        raw_info = notif_queue._queue[0] if not notif_queue.empty() else None  # type: ignore[attr-defined]
-        # The real last received notification is already consumed; parse
-        # mOriginalVersion and mImageUpdateOffset from it.
-        # We need to re-read it — it was popped by wait_notif above.
-        # Re-fetch: the notification was already returned by send_and_ack.
-        # We parse it from _handler's last delivery via a side channel.
-        # Simpler: just track it.
-        # We restructure slightly: call wait_notif manually here.
-
-        # Actually, send_and_ack consumed the notification.  We need the
-        # raw bytes to extract update_offset.  Refactor: repeat the query
-        # manually so we can inspect the payload.
-        await send_cp(build_report_image_info(hdr.signature))
-        raw_info_notif = await wait_notif(timeout=10.0)
-        if verbose:
-            print(f"    image-info notif: {raw_info_notif.hex()}")
-        if not _check_notif(raw_info_notif, OP_REPORT_RECEIVED_IMAGE_INFO, "ReportImageInfo(2)"):
-            return False
-
-        # Parse: [0x10, opcode, status, ver_lo, ver_hi, off0, off1, off2, off3]
-        original_version = 0
-        update_offset    = 0
-        if len(raw_info_notif) >= 9:
-            original_version = struct.unpack_from("<H", raw_info_notif, 3)[0]
-            update_offset    = struct.unpack_from("<I", raw_info_notif, 5)[0]
-        print(
-            f"[*] Device image version: 0x{original_version:04x}  "
-            f"resume offset: {update_offset}"
-        )
-
-        # ?? Step 3: START_DFU ????????????????????????????????????????????
-        if update_offset == 0:
-            print("[*] Sending START_DFU (full image)…")
-            ok = await send_and_ack(
-                build_start_dfu(hdr, update_offset),
-                OP_START_DFU,
-                "StartDfu",
-            )
-            if not ok:
-                return False
-        else:
-            print(f"[*] Resuming from offset {update_offset} — skipping START_DFU.")
-
         # ?? Step 4: RECEIVE_FW_IMAGE — arm data channel ??????????????????
-        print("[*] Sending RECEIVE_FW_IMAGE…")
-        await send_cp(build_receive_fw_image(hdr.signature, update_offset))
-        # No notification is expected after RECEIVE_FW_IMAGE in the Java code
-        # (it proceeds directly to streaming).
+        # SDK (j() in e.java) always converts offset 0→12 for fresh transfer.
+        # RECEIVE_FW_IMAGE does NOT produce a notification — write-with-
+        # response ack at the BLE level is the only confirmation.
+        effective_offset = update_offset if update_offset > 0 else BIN_HEADER_SIZE
+        print(f"[*] Sending RECEIVE_FW_IMAGE (offset={effective_offset})…")
+        await send_cp(build_receive_fw_image(hdr.version, effective_offset))
 
-        # ?? Step 5: stream image body ????????????????????????????????????
-        start_byte = max(0, update_offset - BIN_HEADER_SIZE)
-        total      = len(body)
-        offset     = start_byte
+        # ?? Step 5: stream body with host-initiated buffer check ?????????
+        # Body only, no header prepend (SDK Case B: offset==12).
+        # First buffer is maxBuf - 12 because the header already counts.
+        total = len(body)
+        idx = 0
+        buf_active = buf_check_max > 0
+        is_first_buf = (effective_offset == BIN_HEADER_SIZE)
+        cipher = AES256ECB(aes_key) if aes_key is not None else None
 
-        print(f"[*] Streaming {total - start_byte} bytes ({packet_size}B/packet)…")
-        while offset < total:
-            chunk = body[offset : offset + packet_size]
-            await client.write_gatt_char(DFU_DATA_UUID, chunk, response=False)
-            offset += len(chunk)
-            print(
-                f"\r[*] Progress: {100 * offset // total:3d}%  ({offset}/{total})",
-                end="", flush=True,
-            )
+        print(f"[*] Streaming {total} bytes "
+              f"({packet_size}B/pkt, bufCheck={buf_check_max}"
+              f", AES={'on' if cipher else 'off'})…")
+        while idx < total:
+            # SDK Case B first buffer: maxBuf - 12 (header already counted).
+            if is_first_buf and buf_active:
+                buf_size = min(buf_check_max - BIN_HEADER_SIZE, total - idx)
+                is_first_buf = False
+            elif buf_active:
+                buf_size = min(buf_check_max, total - idx)
+            else:
+                buf_size = total - idx
+
+            buf_start = idx
+            buf_end = idx + buf_size
+
+            # Packetize (and encrypt) this buffer.  Device decrypts whole
+            # 16-byte blocks and keeps any tail as-is, so tails stay plain.
+            chunks = []
+            pos = buf_start
+            while pos < buf_end:
+                pkt_len = min(packet_size, buf_end - pos)
+                plain = body[pos:pos + pkt_len]
+                if cipher:
+                    full = pkt_len - (pkt_len % 16)
+                    chunk = b"".join(
+                        cipher.encrypt_block(plain[blk:blk + 16])
+                        for blk in range(0, full, 16)
+                    ) + plain[full:]
+                else:
+                    chunk = plain
+                chunks.append(chunk)
+                pos += pkt_len
+
+            for attempt in range(3):
+                for chunk in chunks:
+                    await client.write_gatt_char(
+                        DFU_DATA_UUID, chunk, response=False)
+                if not buf_active:
+                    break
+
+                # Host-initiated buffer check (opcode 0x0A); CRC is over the
+                # bytes as sent (encrypted).
+                crc = xor_crc16(b"".join(chunks))
+                if verbose:
+                    print(f"\n    buf-check @{buf_end}: len={buf_size} "
+                          f"crc=0x{crc:04x}")
+                await send_cp(struct.pack(
+                    "<BHH", OP_REPORT_BUFFER_CRC, buf_size, crc))
+
+                status = None
+                try:
+                    while True:
+                        raw = await wait_notif(timeout=10.0)
+                        if verbose:
+                            print(f"    notif: {raw.hex()}")
+                        if (len(raw) >= 3 and raw[0] == NOTIFY_RESPONSE_CODE
+                                and raw[1] == OP_REPORT_BUFFER_CRC):
+                            status = raw[2]
+                            break
+                except asyncio.TimeoutError:
+                    print(f"\n[!] No buffer-check reply at offset {buf_end}.")
+                    return False
+
+                if status == DFU_STATUS_SUCCESS:
+                    break
+                if status in (0x05, 0x06, 0x07) and attempt < 2:
+                    print(f"\n[*] Buffer CRC error @{buf_end} "
+                          f"({DFU_STATUS_NAMES.get(status, hex(status))}), resending…")
+                    continue
+                name = DFU_STATUS_NAMES.get(status, f"{status:#04x}")
+                print(f"\n[!] Buffer check failed @{buf_end}: {name} (raw {raw.hex()})")
+                return False
+
+            idx = buf_end
+
+            pct = 100 * idx // total
+            print(f"\r[*] Progress: {pct:3d}%  ({idx}/{total})",
+                  end="", flush=True)
         print()
 
+        # Drain stray notifications before VALIDATE.
+        while not notif_queue.empty():
+            stray = notif_queue.get_nowait()
+            if verbose:
+                print(f"    drained stray notif: {stray.hex()}")
+
         # ?? Step 6: VALIDATE_FW_IMAGE ????????????????????????????????????
+        if not client.is_connected:
+            print("[!] Device disconnected after streaming.")
+            return False
+
         print("[*] Validating firmware image…")
-        ok = await send_and_ack(
-            build_validate(hdr.signature),
-            OP_VALIDATE_FW_IMAGE,
-            "ValidateFW",
-            timeout=30.0,
-        )
+        try:
+            ok = await send_and_ack(
+                build_validate(hdr.version),
+                OP_VALIDATE_FW_IMAGE,
+                "ValidateFW",
+                timeout=30.0,
+            )
+        except Exception as exc:
+            print(f"[!] Connection lost during validate ({exc}).")
+            print("[!] No validate result received and image was NOT activated; "
+                  "the device will most likely stay on its current firmware.")
+            return False
         if not ok:
             await _send_reset(client, verbose)
             return False
@@ -465,12 +641,12 @@ async def _run_dfu_transfer(client, hdr: BinHeader, body: bytes, *, verbose: boo
         print("[*] Activating image and rebooting…")
         try:
             await send_cp(bytes([OP_ACTIVE_IMAGE_RESET]))
-            # Device reboots immediately; write-response may not arrive.
         except Exception:
-            pass
+            pass  # device resets on this command; a lost link is expected
 
-        await client.stop_notify(DFU_CONTROL_PT_UUID)
-        print("[?] Realsil DFU complete. Device is rebooting into new firmware.")
+        print("[+] Image validated and activated. The device reboots; the "
+              "bootloader decides whether to install it — re-scan to confirm.")
+        return True
         return True
 
     except asyncio.TimeoutError:

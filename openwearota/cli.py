@@ -136,7 +136,7 @@ async def _detect_and_report(client):
     print()
     return family, chip_id
 
-async def _do_flash(client, family, fw_path, verbose=False):
+async def _do_flash(client, family, fw_path, verbose=False, limit_function=False):
     from .detect import detect_shb_slb_mode
     from .drivers.shb_slb import run_slb_upgrade, run_shb_ota_upgrade
     from .drivers.telink  import run_telink_upgrade
@@ -160,7 +160,10 @@ async def _do_flash(client, family, fw_path, verbose=False):
     elif family == "jieli":   return await run_jieli_upgrade(client, fw_path, verbose=verbose)
     elif family == "beken":   return await run_beken_upgrade(client, fw_path, verbose=verbose)
     elif family == "onmicro": return await run_onmicro_upgrade(client, fw_path, verbose=verbose)
-    elif family == "realsil": return await run_realsil_upgrade(client, fw_path, verbose=verbose)
+    elif family == "realsil":
+        return await run_realsil_upgrade(
+            client, fw_path, verbose=verbose, limit_function=limit_function,
+        )
     print(red(f"  [!] No driver for: {family}"))
     return False
 
@@ -381,7 +384,11 @@ async def cmd_flash_direct(args):
         if not args.yes:
             if _prompt("Type YES to proceed", "cancel") != "YES":
                 print(dim("  Cancelled.")); return
-        ok = await _do_flash(client, family, fw_path, verbose=getattr(args,"verbose",False))
+        ok = await _do_flash(
+            client, family, fw_path,
+            verbose=getattr(args, "verbose", False),
+            limit_function=getattr(args, "limit_function", False),
+        )
         sys.exit(0 if ok else 1)
     finally:
         try: await client.disconnect()
@@ -412,6 +419,8 @@ def _build_parser():
     pf.add_argument("address"); pf.add_argument("firmware")
     pf.add_argument("-y","--yes", action="store_true")
     pf.add_argument("-v","--verbose", action="store_true")
+    pf.add_argument("--limit-function", action="store_true",
+                    help="Device is already in DFU mode (skip phase-1 handover)")
     pu = sub.add_parser("uart")
     pu.add_argument("address")
     pu.add_argument("--service-uuid", default=None)

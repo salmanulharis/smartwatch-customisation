@@ -1,6 +1,41 @@
+# Python / build junk
 .venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
 build/
 dist/
+
+# Third-party / vendor material: copyrighted, NOT ours to publish (repo is public)
+# realme Fit APKs
+reference-app/
+# decompiler tool
+jadx-1.5.1/
+# Realtek bee2 GCC SDK
+sdk/
+# Realtek RTL8762D SDKs
+sdks/
+# third-party firmware projects (e.g. rtl8762c-ble-uart)
+firmwares/
+*.7z
+*.zip
+*.rar
+*.chm
+
+# research/: keep OUR work, ignore vendor-derived files
+#   research/dials/      our watch faces + favourites  -> tracked
+#   research/firmware/   stock realme firmware         -> ignored (vendor)
+#   research/mods/       patched stock firmware        -> ignored, rebuild with tools/s100_mods.py
+#   research/jadx-*/     decompiled realme app         -> ignored (vendor)
+#   research/dex-strings.tsv, jadx.log (APK-derived)   -> ignored
+research/*
+!research/dials/
+
+# custom firmware build outputs (sources under firmware/ stay tracked)
+firmware/**/build/
+firmware/**/bin/
+firmware/**/mem_define.ld
+firmware/**/*.elf
+firmware/**/*.hex
+firmware/**/*.map
+firmware/**/*.dis

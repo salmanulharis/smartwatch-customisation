@@ -1061,10 +1061,13 @@ The default AES-256 key embedded in the SDK source is (hex):
 1F 67 63 DF 80 7A 7E 70  96 0D 4C D3 11 8E 60 1A
 ```
 This is a **default key** from Realsil's own SDK — production devices may use a
-different per-product key provisioned at manufacture.  OpenWearOTA currently sends the
-*plaintext* (unencrypted) payload, which will work on devices that have AES disabled
-or that use the default key.  If your device requires AES, the encrypted bytes must be
-computed externally and passed in.
+different per-product key provisioned at manufacture.
+
+OpenWearOTA now implements AES-256-ECB encryption (pure-Python, in `openwearota/aes.py`)
+and applies it by default using the UTE variant key (bytes 5–10 replaced by ASCII
+`"UTE_RK"`).  The default key above (`REALSIL_STOCK_AES_KEY`) and the UTE key
+(`REALSIL_DEFAULT_AES_KEY`) are both available in the driver module.  Both the 16-byte
+START_DFU metadata and every 16-byte block of the firmware body are encrypted.
 
 ### 7.6 DFU status codes (byte[2] of all notifications)
 
@@ -1105,13 +1108,14 @@ computed externally and passed in.
 
 ### 7.8 Big-image handling (>100 KB)
 
-`DfuService.java` contains a special-case for images larger than 100 KB: when the
-streaming offset reaches exactly 104,000 bytes (`BIG_IMAGE_SPECIAL_POINT`), the SDK
-*skips ahead* to byte offset 143,372 (140 KB − 12-byte header) and resumes streaming
-from there.  This is an apparent workaround for a chip-side flash layout constraint
-where bytes 104,000–143,372 are reserved/remapped.  OpenWearOTA does not currently
-implement this skip — if you have a >100 KB firmware image that fails mid-transfer,
-this may be the cause.
+`DfuService.java` contains a special-case for images larger than 100 KB: body bytes
+104,000–143,360 (140 × 1024) are skipped during streaming.  This is an apparent
+workaround for a chip-side flash layout constraint where that region is
+reserved/remapped.
+
+OpenWearOTA now implements this skip.  When the firmware file (header + body) exceeds
+100 KB, the driver removes body bytes 104,000–143,360 before streaming.  The constants
+`BIG_IMAGE_SKIP_FROM` and `BIG_IMAGE_SKIP_TO` are defined in `realsil.py`.
 
 ---
 
