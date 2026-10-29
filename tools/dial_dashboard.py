@@ -39,8 +39,11 @@ def bt_status():
     return [frame(70, 22, draw(False)), frame(70, 22, draw(True))]
 
 
+BAT_X0, BAT_W = 199, 5           # type 33: exact battery %, 3-char field from x 199
+
+
 def battery_status():
-    """11 frames: firmware gives ceil(%/10); label shows that 10 % step honestly."""
+    """11 frames (firmware level ceil(%/10)) for the dots; the exact % is element type 33 + baked "%"."""
     def draw(level):
         lit = battery_dots(level, 5)
         on = CORAL
@@ -50,8 +53,7 @@ def battery_status():
             c.d.rectangle((30 * 4, 9 * 4, 31.5 * 4, 13 * 4), fill=WHITE)
             for i in range(5):
                 c.dot(6 + i * 4.6, 11, 3.6, on if i < lit else DARK)
-            label = "0%" if level == 0 else f"{level * 10 - 9}-{level * 10}%"
-            ttext(c, label, 35, 15, 8, WHITE)
+            ttext(c, "%", BAT_X0 - 164 + 3 * BAT_W, 21, 8, WHITE, anchor="ls")
         return f
     return [frame(62, 22, draw(lv)) for lv in range(11)]
 
@@ -170,6 +172,7 @@ def layout():
         (63, 39, 38, sd), (64, 47, 38, sd),
         (9, 82, 23, bt_status()),
         (8, 164, 23, battery_status()),
+        (33, BAT_X0, 36, small_digits(8, WHITE, BAT_W, 10)),
         (57, 10, TY, big), (58, 44, TY, big),
         (7, 79, TY, colon()),
         (59, 90, TY, big), (60, 124, TY, big),
@@ -186,4 +189,4 @@ def layout():
 
 
 SAMPLE = {57: "1", 58: "0", 59: "4", 60: "5", 65: "2", 66: "9", 63: "1", 64: "0",
-          35: "", 36: "7", 37: "2", 38: "0", 39: "5", 40: "4", 41: "3", 42: "2"}
+          35: "", 36: "7", 37: "2", 38: "0", 39: "5", 40: "4", 41: "3", 42: "2", 33: "85"}

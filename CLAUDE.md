@@ -33,6 +33,7 @@ prebuilts/             # prebuilt firmware images by chipset (currently empty pl
 docs/TechLife-S100.md  # research notes for the realme TechLife Watch S100 (RTL8762C)
 tools/                 # standalone helper scripts (not part of the package)
   s100.py              # TechLife S100 control tool (stock firmware, UTE protocol)
+  s100_app.py/.html    # S100 Companion: local browser GUI (faces + controls), 127.0.0.1:8100
   ute_fw_query.py      # UTE cloud firmware update query tool
   s100_gatt_dump.py    # read-only GATT/OTA-info dumper
 dist/                  # built wheel/sdist (git-ignored)

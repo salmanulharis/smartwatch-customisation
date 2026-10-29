@@ -212,9 +212,9 @@ def compose_sample(els, sample: dict[int, str]) -> Image.Image:
         if t in (1, 2, 3):                       # analog hands: drawn last, rotated about x/y
             hands.append((t, x, y, frames[0], opt[0]["reserved"][4]))
             continue
-        if t == 21:                              # temperature "29", placed exactly like the firmware:
+        if t in (21, 33):                        # temperature / battery %, placed like the firmware:
             fw = frames[0].size[0]               # char k of n at x + ((3-n)*w >> 1) + k*w
-            s = sample.get(21, "29")
+            s = sample.get(t, "29" if t == 21 else "85")
             for k, ch in enumerate(s):
                 face.paste(frames[DIGIT_CHARS.index(ch)], (x + ((3 - len(s)) * fw >> 1) + k * fw, y))
             continue
@@ -235,7 +235,7 @@ def compose_sample(els, sample: dict[int, str]) -> Image.Image:
 
 
 def build(out: Path, design: str = "classic") -> Path:
-    if design in ("nothing", "widgets", "dashboard", "duo", "duo2", "duo3", "duo4", "duo5", "duo6", "blob", "dusk", "world"):
+    if design in ("nothing", "widgets", "dashboard", "duo", "duo2", "duo3", "duo4", "duo5", "duo6", "blob", "dusk", "world", "widgetsdot"):
         mod = __import__(f"dial_{design}")
         els = mod.layout()
         face = compose_sample(els, mod.SAMPLE)
@@ -286,66 +286,76 @@ def build(out: Path, design: str = "classic") -> Path:
     return out
 
 
+def _print_progress(sent: int, total: int) -> None:
+    print(f"\r  sent {sent}/{total}", end="", flush=True)
+    if sent == total:
+        print()
+
+
+async def send_dial(w, blob: bytes, progress=_print_progress, log=print) -> bool:
+    """Transfer a dial file over an already bound S100 connection."""
+    await w.write(b"\x26\x01")
+    cfg = await w.expect(b"\x26\x01", timeout=5)
+    if not cfg or len(cfg) < 16:
+        log("no dial config reply"); return False
+    width, height = struct.unpack_from(">HH", cfg, 6)
+    max_size = struct.unpack_from(">I", cfg, 11)[0]
+    log(f"watch dial config: {width}x{height}, max {max_size} bytes")
+    if (width, height) != (W, H) or len(blob) > max_size:
+        log("dial does not fit this watch"); return False
+
+    await w.write(b"\x26\x02")
+    if not await w.expect(b"\x26\x02", timeout=10):
+        log("watch not ready (no 26 02)"); return False
+
+    step = w.max_len - 3
+    packets = [blob[i:i + step] for i in range(0, len(blob), step)]
+    start = 0
+    for attempt in range(4):
+        for seq in range(start, len(packets)):
+            await w.write(bytes([0x27]) + struct.pack(">H", seq) + packets[seq], big=True)
+            if (seq + 1) * step // 4096 != seq * step // 4096:
+                await w.expect(b"\x26\x03\x04", timeout=3)
+            elif seq % 10 == 9:
+                await asyncio.sleep(0.04)
+            progress(seq + 1, len(packets))
+        await asyncio.sleep(3)
+        await w.write(b"\x26\x03\x00")
+        reply = None
+        while reply is None or reply[:3] == b"\x26\x03\x04":
+            reply = await w.expect(b"\x26\x03", timeout=15)
+            if reply is None:
+                break
+        if reply is None:
+            log("no final reply from watch"); return False
+        code = reply[2]
+        if code == 0:
+            await w.sync_time()
+            log("upload OK — the watch should now show the new face (time synced from this PC)")
+            return True
+        if code == 3 and len(reply) >= 5:
+            start = struct.unpack_from(">H", reply, 3)[0]
+            log(f"watch asks to resend from packet {start}")
+            continue
+        log({1: "CRC check failed", 2: "dial too large"}.get(code, f"error {reply.hex()}"))
+        return False
+    return False
+
+
 async def upload(path: Path, verbose: bool) -> bool:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from s100 import S100
 
     blob = path.read_bytes()
     async with S100(verbose=verbose) as w:
-        await w.write(b"\x26\x01")
-        cfg = await w.expect(b"\x26\x01", timeout=5)
-        if not cfg or len(cfg) < 16:
-            print("no dial config reply"); return False
-        width, height = struct.unpack_from(">HH", cfg, 6)
-        max_size = struct.unpack_from(">I", cfg, 11)[0]
-        print(f"watch dial config: {width}x{height}, max {max_size} bytes")
-        if (width, height) != (W, H) or len(blob) > max_size:
-            print("dial does not fit this watch"); return False
-
-        await w.write(b"\x26\x02")
-        if not await w.expect(b"\x26\x02", timeout=10):
-            print("watch not ready (no 26 02)"); return False
-
-        step = w.max_len - 3
-        packets = [blob[i:i + step] for i in range(0, len(blob), step)]
-        start = 0
-        for attempt in range(4):
-            for seq in range(start, len(packets)):
-                await w.write(bytes([0x27]) + struct.pack(">H", seq) + packets[seq], big=True)
-                if (seq + 1) * step // 4096 != seq * step // 4096:
-                    await w.expect(b"\x26\x03\x04", timeout=3)
-                elif seq % 10 == 9:
-                    await asyncio.sleep(0.04)
-                print(f"\r  sent {seq + 1}/{len(packets)}", end="", flush=True)
-            print()
-            await asyncio.sleep(3)
-            await w.write(b"\x26\x03\x00")
-            reply = None
-            while reply is None or reply[:3] == b"\x26\x03\x04":
-                reply = await w.expect(b"\x26\x03", timeout=15)
-                if reply is None:
-                    break
-            if reply is None:
-                print("no final reply from watch"); return False
-            code = reply[2]
-            if code == 0:
-                await w.sync_time()
-                print("upload OK — the watch should now show the new face (time synced from this PC)")
-                return True
-            if code == 3 and len(reply) >= 5:
-                start = struct.unpack_from(">H", reply, 3)[0]
-                print(f"watch asks to resend from packet {start}")
-                continue
-            print({1: "CRC check failed", 2: "dial too large"}.get(code, f"error {reply.hex()}"))
-            return False
-    return False
+        return await send_dial(w, blob)
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     pb = sub.add_parser("build")
-    pb.add_argument("design", nargs="?", choices=["classic", "nothing", "widgets", "dashboard", "duo", "duo2", "duo3", "duo4", "duo5", "duo6", "blob", "dusk", "world"], default="nothing")
+    pb.add_argument("design", nargs="?", choices=["classic", "nothing", "widgets", "dashboard", "duo", "duo2", "duo3", "duo4", "duo5", "duo6", "blob", "dusk", "world", "widgetsdot"], default="nothing")
     pb.add_argument("-o", "--out")
     pu = sub.add_parser("upload")
     pu.add_argument("file", nargs="?", default=str(OUT_DIR / "nothing.bin"))

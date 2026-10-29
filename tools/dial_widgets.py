@@ -195,6 +195,8 @@ def hr_digits():
 
 # ---------------- rings ----------------
 RING_R, RING_W = 20, 4.5
+RING_PCT_X0, RING_PCT_W = 53, 7       # type 33 exact battery %: 3-char field under the ring
+MINI_CLOCK = True                     # False = dot-matrix variant: battery ring instead of the mini clock
 
 
 def battery_ring():
@@ -210,9 +212,7 @@ def battery_ring():
             if level:
                 c.d.rectangle(((cx - 5.5) * SS, (cy - 2.5) * SS, (cx - 5.5 + fill_w) * SS, (cy + 2.5) * SS),
                               fill=RED if level <= 2 else WHITE)
-            # firmware only exposes ceil(%/10), so label the real range, not a fake exact value
-            label = "0%" if level == 0 else f"{level * 10 - 9}-{level * 10}%"
-            ttext(c, label, cx, 63, 10, WHITE, anchor="ms")
+            ttext(c, "%", RING_PCT_X0 - 40 + 3 * RING_PCT_W, 63, 10, WHITE, anchor="ls")   # number = type 33
         return f
     return [frame(54, 66, draw(lv)) for lv in range(11)]
 
@@ -285,7 +285,8 @@ def background() -> Image.Image:
                 fill=CORAL)
     ttext(c, "BPM", 200, 199, 8, GRAY, anchor="ls", spacing=0.8)
     c.d.line((120 * SS, 222 * SS, 120 * SS, 262 * SS), fill=CARD, width=int(1.2 * SS))
-    clock_face(c)
+    if MINI_CLOCK:
+        clock_face(c)
     return c.image()
 
 
@@ -313,12 +314,16 @@ def layout():
         (63, 195, 154, dd), (64, 204, 154, dd),
         # heart rate (hundreds/tens/units)
         (35, 168, 185, hr), (36, 177, 185, hr), (37, 186, 185, hr),
-        # bottom: mini analog clock (hands rotated by the watch) + connection ring
+        (9, 144, 212, connection_ring()),
+    ] + ([  # bottom-left: mini analog clock (hands rotated by the watch) …
         (1, CLOCK_X, CLOCK_Y, [hr_img], hr_opt),
         (2, CLOCK_X, CLOCK_Y, [mn_img], mn_opt),
-        (9, 144, 212, connection_ring()),
-    ]
+    ] if MINI_CLOCK else [  # … or battery ring with the exact percentage
+        (8, 40, 212, battery_ring()),
+        (33, RING_PCT_X0, 265, [frame(RING_PCT_W, 12, lambda c, ch=ch: ttext(c, ch, RING_PCT_W / 2, 10, 10, WHITE,
+                                                                             anchor="ms")) for ch in "-./0123456789:"]),
+    ])
 
 
 SAMPLE = {57: "1", 58: "0", 59: "4", 60: "5", 65: "2", 66: "9", 63: "1", 64: "0",
-          35: "", 36: "7", 37: "2"}
+          35: "", 36: "7", 37: "2", 33: "85"}

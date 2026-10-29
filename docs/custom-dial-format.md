@@ -242,3 +242,18 @@ packet of full trip the watch. `tools/s100_dial.py build` now pads such files. *
   reserved[0] = 0, reserved[1:3] = signed LE16 minute offset from the watch's local time,
   reserved[3] = digit position (0 hour tens, 1 hour units, 2 minute tens, 3 minute units).
   12 h mode follows the stock rule (hour > 12 → hour − 12). Used by `tools/dial_world.py`.
+
+## Battery: exact percentage (type 33) and the charging flag
+
+- Battery percent lives at settings `0x20BE84 + 0x109` (u8). Every battery display reads it: the
+  charging screen (`BatteryChargingScreenUI`, `0x84973E`), the status bar (`StatusBarScreenUI`,
+  `0x858976`), the face battery icon and the BLE `A2` reply (`A2 <percent>`, used by tools/s100_app.py).
+- **Type 8** (icon) goes through `0x8439D2`: level = percent/10, +1 if there is a remainder and
+  percent ≥ 5, capped at 10. While the flag byte at RAM `0x210236` is 1 (charging) the level drops
+  by one on odd seconds, so the icon blinks while charging. It is coarse by design, not wrong.
+- **Type 33 (`BATNUM`)** draws the exact percent as digits (`0x85CA62` → `0x84404A`: itoa of
+  `+0x109`, 3 chars, leading spaces stripped). Same sprite base (frame 3) and drawer (`0x8435BE`)
+  as the temperature (type 21), so: 14-frame digit sprite, number centred in a 3-character field,
+  char k at `x + ((3 − n)·w >> 1) + k·w`. Uses one draw slot per digit. No "%" is drawn (r2 = 0);
+  bake it into the background. Static analysis only, not yet shown on the watch.
+- Type 34 (`BATPERCENT`) branches into the battery-icon path (`0x85C41C`); purpose not traced.

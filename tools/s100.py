@@ -170,15 +170,18 @@ class S100:
         await self.expect(b"\x3a\xfa", timeout=3)
 
     async def settings(self, screen_off_s: int = 5, raise_to_wake: bool = True, height_cm: int = 170,
-                       weight_kg: int = 65, step_goal: int = 10000, age: int = 30, male: bool = True):
+                       weight_kg: int = 65, step_goal: int = 10000, age: int = 30, male: bool = True,
+                       fahrenheit: bool = False):
         """`A9` profile packet (sendStepLenAndWeightToBLE). Overwrites ALL these fields at once.
 
         Byte 2 is height (function list 2 has 0x1000 on this watch); HR alarms off,
-        language English (2), temperature °C (1).
+        language English (2), temperature unit byte 17 (1 °C, 2 °F). The firmware ignores
+        bytes 5 (screen-off) and 10 (raise-to-wake).
         """
         pkt = bytes([0xA9, 0x00, height_cm & 0xFF, 0x00, weight_kg & 0xFF, screen_off_s & 0xFF]) \
             + step_goal.to_bytes(4, "big") \
-            + bytes([1 if raise_to_wake else 0, 0xFF, 0x00, age & 0xFF, 1 if male else 2, 0x00, 0x02, 0x01, 0x00])
+            + bytes([1 if raise_to_wake else 0, 0xFF, 0x00, age & 0xFF, 1 if male else 2, 0x00, 0x02,
+                     2 if fahrenheit else 1, 0x00])
         await self.write(pkt)
         reply = await self.expect(b"\xa9", timeout=3)
         return reply is not None
