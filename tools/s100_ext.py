@@ -208,7 +208,8 @@ def build(pack: Path = PACK) -> list[tuple[int, str, str]]:
     t = TRAMP[0]
     tramp = {}
     far = {k: v for k, v in dict(c5a=0x836D48, c5b=0x836C9E, tap=0x84347A, ok=0x844B7E, no=0x844C06,
-                                 plug=0x832008, touch=0x83D4E0, raise_off=0x83226E, hr_next=0x850BD2).items()}
+                                 plug=0x832008, touch=0x83D4E0, raise_off=0x83226E, hr_next=0x850BD2,
+                                 apps_go=0x8433AE).items()}
 
     def add_tramp(name: str, code: str):
         nonlocal t
@@ -274,6 +275,27 @@ def build(pack: Path = PACK) -> list[tuple[int, str, str]]:
         mov r1, r4
         bl {syms['t_hr_down']:#x}
         b.w 0x850BD2""")
+    # key action 14 (open apps; the face's button) always switched to the list: honour the menu style
+    # (settings +0x220 == 1: grid), as the stock slide code does for swipes (0x844D74 / 0x844F6E)
+    add_tramp("apps", """
+        movw r1, #0xC0A4
+        movt r1, #0x20
+        ldrb r1, [r1]
+        movw r0, #0xDD10
+        movt r0, #0x20
+        cmp r1, #1
+        bne go
+        movw r0, #0xE5E0
+        movt r0, #0x20
+    go: b.w 0x8433AE""")
+    # app grid row y (replaces "subs r0, r6, #1; mul fp, r0, r7" at 0x865458): rows start 26 px lower
+    # so that, with 76 px rows, three rows of 64 px tiles sit centred (32 px margins); the touch cells use
+    # the same y, so they move with the tiles
+    add_tramp("gridy", """
+        subs r0, r6, #1
+        mul fp, r0, r7
+        add.w fp, fp, #26
+        bx lr""")
     # ---- hooks in stock code
     patch(0x00836D44, asm(f"b.w {tramp['c5']:#x}", 0x00836D44), bytes.fromhex("032caad0"))
     patch(0x0084341E, asm(f"b.w {tramp['tap']:#x}", 0x0084341E), bytes.fromhex("00202be0"))
@@ -295,6 +317,29 @@ def build(pack: Path = PACK) -> list[tuple[int, str, str]]:
     # backlight_apply: only 0 counts as "unset" (stock: < 25 -> 50), so the always-on screen can use
     # the two dimmest LED driver steps (ext.c aod_dim); the normal levels stay 25-100 %
     patch(0x0083C2D6, bytes.fromhex("0128"), bytes.fromhex("1928"))
+    patch(0x008433A4, asm(f"b.w {tramp['apps']:#x}", 0x008433A4), bytes.fromhex("424802e0"))
+    # app grid: rows every 76 px like the columns (64 px tiles, 12 px gaps both ways; stock 92 px rows
+    # left 28 px between rows). Builder row height, tile offset in the row, rows drawn per frame (5 -> 6:
+    # no empty strip at the bottom while scrolling), and the scroller's height (3 rows per screen ->
+    # 3 x 76 = 228 instead of 276) in the snap math and the scroll call
+    patch(0x00865404, bytes.fromhex("4c27"), bytes.fromhex("5c27"))
+    patch(0x00865458, asm(f"bl {tramp['gridy']:#x}", 0x00865458) + bytes.fromhex("00bf"),
+          bytes.fromhex("701e00fb07fb"))
+    patch(0x00865486, asm("add.w sb, fp, #6", 0x00865486), bytes.fromhex("0bf11409"))
+    patch(0x0086555A, bytes.fromhex("062e"), bytes.fromhex("052e"))
+    # every "(276 - margins) / 3" row step of the grid: snap on release (0x865940/66), finger drag
+    # (0x865A82), the momentum timer (0x865626, 0x86571E) and the other release cases (0x865BEC/C12).
+    # (r1 and r0 forms; 0x865C5C, the tap zone 0..276, is not a row step and stays)
+    for addr in (0x00865940, 0x00865966, 0x00865BEC, 0x00865C12):
+        patch(addr, asm("rsb.w r0, r0, #0xe4", addr), bytes.fromhex("c0f58a70"))
+    for addr in (0x00865626, 0x0086571E, 0x00865A82):
+        patch(addr, asm("rsb.w r1, r1, #0xe4", addr), bytes.fromhex("c1f58a71"))
+    patch(0x008659EC, asm("mov.w r0, #0xe4", 0x008659EC), bytes.fromhex("4ff48a70"))
+    # Settings list (FunctionList): row icon 4 px inside its row background (x 14 in a row at x 10) ->
+    # x 20, the 10 px inset of the other list screens (Workout list); the label stays at x 70
+    patch(0x0084F3CE, bytes.fromhex("1422"), bytes.fromhex("0e22"))
+    # power off: save changed preferences first (bl 0x83162C at 0x831664)
+    patch(0x00831664, asm(f"bl {syms['t_power_off']:#x}", 0x00831664), asm("bl 0x83162C", 0x00831664))
     patch(0x00850BCC, asm(f"b.w {tramp['hr']:#x}", 0x00850BCC) + bytes.fromhex("00bf"),
           bytes.fromhex("0878" "00b1" "0e70"))
     # swipe down opens the quick panel from every side page too (navigation templates, word 5 =

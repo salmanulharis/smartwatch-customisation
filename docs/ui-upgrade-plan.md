@@ -703,3 +703,72 @@ button, screen timeout and simulated battery / time / AOD / charging. Clean-up: 
 old `.text3` section and rev-12 art helpers removed; old builds and flash logs moved to
 `research/archive/` (git-ignored). Final files: `c9_apps_v1336.bin` (SHA-256 field valid, rev 1336,
 567,468 B) + `ui_v15.bin` (image 0x45F2DC of 0x464C00). Rollback pair kept: `c8_aod_v1335.bin` + `ui_v14.bin`.
+
+### 12.14 Release c10: settings survive a power-off (INSTALLED 2026-10-30)
+
+Flashed 2026-10-30 (app only, 3rd attempt; the first two did not connect), ValidateFW 100301, readback
+ffd4 `00 90 53 00` = r1337, battery 89 %. Power-cycle check owed by the owner.
+
+App **v1337** (`c10_prefs`), same UI pack rev 15 (only the app changes). Owner's report: Grid chosen as menu
+style, after power-off / on the menu is a list again.
+
+Root causes:
+1. **Watch-side changes were never saved.** `save_settings` (`0x830654`, block `0x20BE84` → flash
+   `0x97A000`) has 8 callers: phone commands, a periodic save at hh:10 when hh % 10 == 0, factory /
+   reset paths. Neither the settings screens (menu style `+0x220`, brightness `+0x188`, vibration
+   `+0x1F5`, timeout `+0xFA`, DND, raise) nor the quick-panel tiles nor power off (`0x831660`) save.
+2. **The button always opened the list.** Key action 14 (`0x8433A4`) switches straight to
+   MainMenuList; the menu style is applied only inside the slide code (`0x844D74`, `0x844F6E`), so the
+   c1 button mapping ignored it.
+
+Fixes: preference fields (found by driving every settings screen in the emulator and diffing the block:
+`+0x32, 0x64–0x66, 0xEE–0xFB, 0x11C, 0x188, 0x1A4–0x1A6, 0x1BA–0x1BB, 0x1F5, 0x220, 0x2BC–0x2BF,
+0x2CC–0x2CD`; `+0x1A0/0x1A1` are counters and excluded) are hashed (`t_prefs_sum`); at every screen-off
+timeout (`aod_screen_off`, dock timeout) and on power off (`bl 0x83162C` at `0x831664` → `t_power_off`)
+the block is saved when the hash differs from the last save. No write below 3 % battery. Our own saves
+(CFG from the apps, watch settings, quick-panel AOD tile) go through `t_save` and move the baseline. Key
+action 14 → trampoline: grid when `+0x220 == 1`, else list. Nothing is written at boot; stock defaults
+apply only when the stored block is used as is.
+
+Emulator (`scratchpad c10test.py`): 18/18 — button → list / grid by style; first screen-off saves once,
+no write without change; a write after each of menu style, brightness, vibration, raise, timeout, DND,
+AOD; none for steps / counters / battery; power off saves after a change, not at 2 %; CFG saves once and
+the next screen-off does not; AOD on timeout unchanged. c9 suite on c10: unchanged.
+Not testable offline: the flash write itself and a real power cycle (verify on the watch).
+
+### 12.15 Release c11: uniform app-grid spacing (installed as part of c12 / r1339)
+
+App **v1338** (`c11_grid`), UI pack rev 15 unchanged. The grid's columns step 76 px (64 px tiles, 12 px
+gaps) but rows stepped 92 px (28 px gaps). The row height lives in three places that must agree: the
+builder (`0x865404` r7), the touch handler's snap step `(0x114 − m) / 3` (`0x865940`, `0x865966`) and the
+scroller's height (`0x8659EC`, 3 rows per screen). All now use 76 (height 228 = 3 × 76). Rows start 26 px
+lower (trampoline for `subs r0,r6,#1; mul fp,r0,r7` at `0x865458`) so three rows sit centred (32 px
+margins) and the touch cells (same y) move with the tiles; tile offset in the row 20 → 6 (`0x865486`);
+rows drawn per frame 5 → 6 (`0x86555A`) so no strip is missing at the bottom while scrolling.
+Emulator (`scratchpad c11test.py`): 24/24 — full rows at y 32/108/184 and x 12/88/164 (12 px gaps both
+ways) at scroll 0 and at the last page (−228); all 18 tiles open their app. c9 / c10 suites unchanged.
+
+### 12.16 Release c12: Settings list icon inset (INSTALLED 2026-10-30)
+
+Flashed 2026-10-30 (app only, first attempt), ValidateFW 100301, readback ffd4 `00 b0 53 00` = r1339, battery
+87 %. Includes c11 (grid spacing), which was never flashed on its own.
+
+App **v1339** (`c12_inset`) = c11 + Settings (FunctionList) row icons at x 20 (`movs r2,#0xE` at
+`0x84F3CE` → `#0x14`), 10 px inside the 220 px row background at x 10 like the Workout list; labels stay
+at x 70. Audit of the list screens: app list (disc 9 px inside its pill), Workout list (10 px), DND,
+heart-rate info, weather list, workout summary already have ≥ 9 px; only Settings had 4 px.
+Suites on c12: grid 24/24, preferences 18/18, c8/c9 checks unchanged.
+
+### 12.17 Release c13: grid scrolling glitch (INSTALLED 2026-10-30)
+
+Flashed 2026-10-30 (app only, first attempt), ValidateFW 100301, readback ffd4 `00 c0 53 00` = r1340, battery
+87 %. Owner confirmed scrolling is smooth (2026-10-30).
+
+App **v1340** (`c13_gridscroll`). Owner: the 76 px grid (c11) glitches while scrolling. Cause: c11 changed
+the row step in the builder, the release snap and the scroller call, but the grid code computes
+`(0x114 − m) / 3` (= 92) in five more places: finger drag (`0x865A82`), momentum timer (id 4, handler
+`0x8655AC`: frame offset `0x86571E`, end-of-fling snap `0x865626`) and two release cases (`0x865BEC`,
+`0x865C12`). Mixed 92 / 76 made rows jump during a drag / fling and a fling end on a multiple of 92
+(up to 38 px off). All now use 228 / 3 = 76; a scan of the grid code (`0x8653F0–0x865E00`) finds no
+other row step (`0x865C5C` is the tap zone 0..276 and stays). The momentum animation could not be driven
+faithfully in the emulator; grid layout / taps (24/24), preferences (18/18) and c8/c9 suites pass.

@@ -35,6 +35,7 @@ typedef struct {
     uint8_t report[12];
     char aod_temp[8], aod_pct[8], aod_dom[4];
     char qs_bat[4], qs_day[4];
+    uint32_t pref_magic, pref_sum;                /* last saved user preferences (t_prefs_*) */
     uint8_t dim_pending, ws_page;
 } state_t;
 #define ST ((state_t *)0x0021B000u)      /* free static RAM between .bss end and the heap */
@@ -369,7 +370,8 @@ int nav_check(const uint8_t *buf) {
 /* ================================================================== quick panel */
 void t_set(char key, int on);
 void t_report(void);
-static void qp_aod(int t) { if (t) return; t_set('a', S_AOD != 1); save_settings(); t_report(); refresh(D_STATUSBAR); }
+void t_save(void);
+static void qp_aod(int t) { if (t) return; t_set('a', S_AOD != 1); t_save(); t_report(); refresh(D_STATUSBAR); }
 static void qp_open(uint32_t desc) { RETURN_TO = D_STATUSBAR; gui_switch(desc); }
 static void qp_find(int t) { if (!t) qp_open(D_FINDPHONE); }
 static void qp_watchset(int t) { if (!t) qp_open(D_WATCHSET); }
@@ -507,8 +509,10 @@ void aod_dim(int on) {
 }
 
 /* replaces "b.w 0x8464FA" at 0x84236C: the screen-off timer path of every screen */
+void t_prefs_check(void);
 void aod_screen_off(void) {
     uint32_t cur = CUR_SCREEN;
+    t_prefs_check();
     if (S_AOD == 1 && cur != D_CLOCK && cur != D_NAV && !(U16(cur + 0x30) & 0x8000) &&
         S_BATTERY > 10 && DISPLAY_ON == 1) {
         ST->dock_mode = 1;
@@ -602,7 +606,7 @@ void t_config(const char *s) {
             ST->dock_mode = (uint8_t)(s[5] - '0'); ST->dock_auto = 0; gui_switch(D_CLOCK);
         }
     }
-    if (changed) save_settings();
+    if (changed) t_save();
     t_report();                                        /* every CFG gets the current settings back */
 }
 
@@ -623,6 +627,7 @@ void t_clock_key(int cls, int k) {
 }
 
 void t_dock_timeout(void) {                            /* timer 1 on the dock screen */
+    t_prefs_check();
     if (ST->dock_mode == 1) { os_timer_restart(TIMER_OFF, 0x7FFFFFFFu); return; }
     if (S_AOD == 1) {
         ST->dock_mode = 1;
@@ -796,7 +801,7 @@ void t_ws_enter(int a, int b) {
 }
 void t_ws_exit(void) {
     leave(D_WATCHSET);
-    if (ST->ws_dirty) { ST->ws_dirty = 0; save_settings(); }
+    if (ST->ws_dirty) { ST->ws_dirty = 0; t_save(); }
 }
 void t_ws_touch(uint8_t *evt) {
     if (evt[0] == 8 || evt[0] == 9) {                  /* swipe up: Wake page, down: Display page */
@@ -850,4 +855,43 @@ void t_qp_status(inst_t *in) {
     add_image(W(in, t_free(in)), QS_WD[wd], 54, 19, 44, 20);
     put_u(ST->qs_day, S_DAY, 1);
     t_qs_num(in, ST->qs_day, 54 + QS_WDW[wd] + 5);
+}
+
+/* ---- user preferences survive a power-off
+ * The stock firmware writes the settings block (save_settings) only after phone commands, at
+ * hh:10 when hh is a multiple of 10, and from a few system paths -- not when a setting is changed on
+ * the watch (menu style, brightness, raise, DND, vibration, timeout, quick-panel tiles) and not on
+ * power off. So watch-side changes were lost unless a save happened to come first. The preference
+ * fields below (found by driving each settings screen in the emulator) are summed; when the sum
+ * differs from the last saved one, the block is saved: at every screen-off timeout and on power off.
+ * Volatile fields (steps, time, battery, counters at +0x1A0) are left out, so it writes only after a
+ * real change. Battery < 3 %: no flash write (brown-out risk), as stock. */
+static const uint16_t T_PREFS[][2] = {   /* {offset, length} in the settings block */
+    {0x32, 1}, {0x64, 3}, {0xEE, 14}, {0x11C, 1}, {0x188, 1}, {0x1A4, 3}, {0x1BA, 2}, {0x1F5, 1},
+    {0x220, 1}, {0x2BC, 4}, {0x2CC, 2},
+};
+#define PREF_MAGIC 0x50524546u
+
+static uint32_t t_prefs_sum(void) {
+    uint32_t h = 2166136261u, i, k;
+    for (i = 0; i < sizeof T_PREFS / sizeof T_PREFS[0]; i++)
+        for (k = 0; k < T_PREFS[i][1]; k++) h = (h ^ U8(SETTINGS + T_PREFS[i][0] + k)) * 16777619u;
+    return h;
+}
+
+void t_save(void) {                                   /* save + remember what was saved */
+    save_settings();
+    ST->pref_sum = t_prefs_sum();
+    ST->pref_magic = PREF_MAGIC;
+}
+
+void t_prefs_check(void) {
+    if (S_BATTERY < 3) return;
+    if (ST->pref_magic != PREF_MAGIC || ST->pref_sum != t_prefs_sum()) t_save();
+}
+
+/* power off (replaces "bl 0x83162C" at 0x831664, the first step of 0x831660) */
+void t_power_off(void) {
+    t_prefs_check();
+    power_off_prep();
 }

@@ -184,6 +184,13 @@ if FEATURE_PACK_V15.with_suffix(".append.json").exists():
         return [p for p in MODS["c1_layout"][1] if p[0] not in _LIST93] + _ext_build(FEATURE_PACK_V15)
     MODS["c9_apps"] = (1336, _c9, "c8 + app list / grid after the reference (pill rows, 4 per screen; "
                        "rounded tiles), SpO2 ring / Measure button, quick-panel battery % at 100 % (pairs with ui_v15)")
+    MODS["c10_prefs"] = (1337, _c9, "c9 + watch-side preferences saved (on change at screen-off and on power "
+                         "off), button opens the grid when the menu style is grid (pairs with ui_v15)")
+    MODS["c11_grid"] = (1338, _c9, "c10 + app grid rows every 76 px like the columns (uniform 12 px gaps, "
+                        "three rows centred) (pairs with ui_v15)")
+    MODS["c12_inset"] = (1339, _c9, "c11 + Settings list icons 10 px inside their rows (pairs with ui_v15)")
+    MODS["c13_gridscroll"] = (1340, _c9, "c12 + grid drag / momentum use the 76 px row step too (no jump "
+                              "while scrolling) (pairs with ui_v15)")
 FEATURE_PACK_V14 = ROOT / "research" / "ui" / "build" / "ui_v14.bin"
 if FEATURE_PACK_V14.with_suffix(".append.json").exists():
     def _c8():

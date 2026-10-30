@@ -115,5 +115,6 @@ void tp_config(void);  /* @0x0083F1DE */   /* touch IC reset + config, stays awa
 void tp_deep_sleep(void);  /* @0x0083F288 */   /* touch IC config + deep sleep (stock) */
 void raise_reset(void);  /* @0x008716FA */   /* wrist gesture state -> idle */
 void stock_charge_key(int cls, int k);  /* @0x008496A4 */   /* BatteryCharging +0x28 */
+void power_off_prep(void);  /* @0x0083162C */   /* first step of power off 0x831660 */
 
 #endif
