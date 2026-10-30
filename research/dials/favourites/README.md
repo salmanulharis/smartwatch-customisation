@@ -15,6 +15,7 @@
 | Dusk (dark analog landscape) | `dusk.bin` | White hour / coral minute hands, tick dots, weather bubble, vertical battery bar, step-goal dots, moon, sun and layered landscape with a wavy line. Saved 2026-10-29. |
 | Dashboard | `dashboard.bin` | Weekday + date, Bluetooth pill, battery pill + exact % (type 33), dot-matrix 12-h time, weather tile, analog clock + heart-rate card, steps + goal bar card. Saved 2026-10-29. |
 | World (dark, world clocks) | `world.bin` | Dotted world map, big coral dot-matrix time, weekday + date, live 2×2 world clocks (Mumbai / New York / Dubai / London), steps ring + odometer count, weather, heart rate. **Needs firmware mod `b5_worldclock` (v1323+).** City offsets fixed at build time (DST included): rebuild after a DST change (New York 2026-11-01). Saved 2026-10-29. |
+| Grid (dark dot clock) | `grid.bin` | Dot clock (grey disc, 30-dot ring, coral minute dot, coral hour hand + white centre cap), sun / weather + temperature, mono 12-h time, 12×3 step-goal dot grid, bolt + 5 battery dots. Saved 2026-10-29. |
 
 Re-install any of them (venv active, phone Bluetooth off):
 

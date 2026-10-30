@@ -18,6 +18,7 @@ openwearota/           # main package
   cli.py               # CLI + interactive TUI (argparse, ANSI color)
   detect.py            # chip family detection by GATT service UUID
   crc.py               # CRC-16 variants (XMODEM, ARC, Telink)
+  aes.py               # pure-Python AES-256-ECB encrypt (RealSil DFU)
   uart.py              # BLE-UART bridge (Nordic NUS)
   drivers/             # one module per chip family
     shb_slb.py         # SHB/SLB (3rd-gen Chinese OTA) + PhyPlus SDK 3.x SHB_OTA mode
@@ -30,17 +31,46 @@ openwearota/           # main package
 pyproject.toml         # build config (setuptools)
 DOCUMENTATION.md       # full protocol reference (all 7 chip families + UART + auto-detect)
 prebuilts/             # prebuilt firmware images by chipset (currently empty placeholder)
-docs/TechLife-S100.md  # research notes for the realme TechLife Watch S100 (RTL8762C)
-tools/                 # standalone helper scripts (not part of the package)
+docs/                  # TechLife S100 research (all S100-specific)
+  TechLife-S100.md     # master research notes + changelog (RTL8762D family, §12b)
+  custom-firmware-plan.md  # roadmap + status (Track B = stock-image patching)
+  bluetooth-protocol.md    # UTE BLE app protocol (stock firmware)
+  custom-dial-format.md    # watch-face ("online dial") binary format + upload protocol
+  ui-resource-format.md    # UI resource pack (images/labels/digits) format
+  ui-framework-notes.md    # stock GUI map in app V001319 (for moving/adding screens)
+  ui-upgrade-plan.md       # CMF UI upgrade: feasibility, phases, P0 results, draft builds (§12)
+  hour12-patch-notes.md    # 12-hour time on dials (command A0, no patch needed)
+  device-capabilities.md, firmware-feasibility.md, always-on-display.md,
+  recovery-plan.md, test-plan.md
+tools/                 # standalone helper scripts (not part of the package; dial/UI tools need Pillow)
   s100.py              # TechLife S100 control tool (stock firmware, UTE protocol)
   s100_app.py/.html    # S100 Companion: local browser GUI (faces + controls), 127.0.0.1:8100
+  s100_dial.py         # build/upload custom watch faces (desk-clock face + uploader)
+  dial_*.py            # face layouts; dial_nothing (dot-matrix Canvas) and dial_widgets/dial_duo
+                       #   (shared builders) are bases, others import them; duo2 must import before
+                       #   modules that swap dial_duo's background
+  s100_mods.py         # rebuild patched firmware (b2_timeout, b5_worldclock, …) from stock image
+  s100_ui.py           # export/rebuild the UI pack (in-place images, raw tail strips, --append growth)
+  s100_screens.py      # offline previewer: runs real screen build/touch code in Unicorn (render/all/nav)
+  s100_preview.py      # interactive emulator session for a built app + UI pack (s100_app "Firmware preview" tab)
+  ui_apps_art.py       # app list / grid art (p_*) + SpO2 in-place art
+  ui_dots.py           # dot-matrix digit frames (appended to the pack) + app pointer patches
+  ui_pickers.py        # CMF picker/roller strips (raw tail, in place)
+  ui_cmf.py, ui_cmf_text.py, ui_labels.json  # CMF-style restyle of the UI pack
+  patch_rtl_header.py  # fix ic_type/ctrl_flag in a Realtek OTA header
+  rehash_rtl_image.py  # recompute SHA-256 of a patched RTL8762x app image
   ute_fw_query.py      # UTE cloud firmware update query tool
   s100_gatt_dump.py    # read-only GATT/OTA-info dumper
-dist/                  # built wheel/sdist (git-ignored)
+research/dials/        # built face .bin + previews; favourites/ = keepers (tracked)
+research/{firmware,mods,ui,jadx-*}/  # stock fw, patched fw, UI exports, decompiled app (git-ignored)
+firmwares/             # third-party fw projects, e.g. rtl8762c-ble-uart (git-ignored)
+android/               # S100 Companion Android app (Kotlin + Compose): link, notifications, Maps nav,
+                       #   weather, music, find phone, faces; build: gradle assembleDebug (SDK in %LOCALAPPDATA%\Android)
+firmware/s100_ext/     # C source of the watch feature screens (built by tools/s100_ext.py)
+dist/                  # built wheel/sdist and APKs (git-ignored)
 .venv/                 # local Python venv (git-ignored)
 jadx-1.5.1/            # JADX decompiler (git-ignored)
 reference-app/         # companion app APKs (git-ignored, copyrighted)
-research/              # decompiled code, firmware dumps (git-ignored)
 ```
 
 ## Architecture

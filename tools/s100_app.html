@@ -73,6 +73,16 @@ label.f { display: flex; flex-direction: column; gap: 4px; font-size: 12px; colo
 .seg { display: inline-flex; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
 .seg button { border: 0; background: transparent; padding: 6px 14px; border-radius: 8px; cursor: pointer; color: var(--dim); }
 .seg button.on { background: var(--accent); color: #fff; }
+.wset { display: grid; gap: 6px; }
+.pv-wrap { width: 240px; height: 280px; border-radius: 40px; overflow: hidden; background: #000; margin: 0 auto;
+  box-shadow: 0 0 0 8px #1b1b1e, 0 0 0 9px #333; cursor: pointer; user-select: none; }
+.pv-wrap img { width: 240px; height: 280px; display: block; }
+.pv-data { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pv-data input[type=number] { width: 70px; }
+#fwpreview select { width: 100%; margin-bottom: 8px; }
+.wrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.wrow small { display: block; color: var(--dim); font-size: 12px; }
+.wrow input { width: 18px; height: 18px; accent-color: var(--accent); }
 .switch { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 13px; }
 .switch input { accent-color: var(--accent); width: 16px; height: 16px; }
 details summary { cursor: pointer; color: var(--dim); font-size: 12.5px; margin-top: 10px; }
@@ -116,6 +126,7 @@ details summary { cursor: pointer; color: var(--dim); font-size: 12.5px; margin-
       <button class="tab" data-view="controls">Controls</button>
       <button class="tab" data-view="settings">Settings</button>
       <button class="tab" data-view="activity">Activity</button>
+      <button class="tab" data-view="fwpreview">Firmware preview</button>
     </nav>
 
     <section class="view active" id="faces"><div class="grid" id="faceGrid"></div></section>
@@ -172,6 +183,22 @@ details summary { cursor: pointer; color: var(--dim); font-size: 12.5px; margin-
           <div class="seg" id="hourSeg"><button data-v="0">24-hour</button><button data-v="1">12-hour</button></div>
         </div>
         <div class="panel">
+          <h3>Display &amp; wake</h3>
+          <p class="hint">Stored on the watch (firmware r1334+); changes made on the watch show up here.</p>
+          <div id="watchSettings" class="wset"><p class="hint">Connect to read the watch's settings.</p></div>
+          <div id="aodBox" style="display:none">
+            <p class="hint">Always-on brightness (its own level; the normal brightness is not changed)</p>
+            <div class="seg" id="abSeg"><button data-v="0">Min</button><button data-v="1">Low</button><button data-v="2">Mid</button><button data-v="3">High</button></div>
+            <div class="row"><button class="btn needs-conn" id="aodShow">Show always-on now</button></div>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>On the charger</h3>
+          <p class="hint">Shown when you plug the charger in. A normal screen: tap or press to use the watch.</p>
+          <div class="seg" id="dockSeg"><button data-v="0">Dock</button><button data-v="1">Always-on</button><button data-v="2">Charging</button><button data-v="3">Nothing</button></div>
+          <div class="row"><button class="btn needs-conn" id="dockShow">Show on watch now</button></div>
+        </div>
+        <div class="panel">
           <h3>Watch</h3>
           <p class="hint">Bluetooth address of your S100.</p>
           <div class="conn-row"><input type="text" id="address" class="grow"><button class="btn" id="scanBtn">Scan</button></div>
@@ -191,10 +218,54 @@ details summary { cursor: pointer; color: var(--dim); font-size: 12.5px; margin-
           <div class="row"><div class="grow"></div><button class="btn needs-conn primary" data-act="profile">Save to watch</button></div>
         </div>
       </div>
-      <p class="note">Not available over Bluetooth on this watch: screen timeout and raise-to-wake (set them on the watch; the firmware ignores them over Bluetooth), and reading steps, heart rate or sleep history (not implemented). Firmware updates are deliberately not part of this app.</p>
+      <p class="note">Not available over Bluetooth on this watch: screen timeout (set it on the watch), and reading steps, heart rate or sleep history (not implemented). Firmware updates are deliberately not part of this app.</p>
     </section>
 
     <section class="view" id="activity"><div class="log" id="log"></div></section>
+
+    <section class="view" id="fwpreview">
+      <div class="panels">
+        <div class="panel">
+          <h3>Try a build before flashing</h3>
+          <p class="hint">Runs the built firmware and UI pack on this PC (emulator): the firmware's own screen,
+            touch and button code. Nothing is sent to the watch. Text uses a stand-in font; sensors, Bluetooth and
+            your custom watch face are not emulated (a stock dial is shown).</p>
+          <label class="hint">Firmware</label><select id="pvFw" class="grow"></select>
+          <label class="hint">UI pack</label><select id="pvUi" class="grow"></select>
+          <div class="row"><button class="btn primary" id="pvStart">Start preview</button></div>
+        </div>
+        <div class="panel pv-panel">
+          <div class="pv-wrap"><img id="pvScreen" alt="Emulated watch screen" draggable="false"></div>
+          <p class="hint" id="pvStatus">Not started.</p>
+          <p class="hint">Click = tap, hold = long press, drag = swipe.</p>
+          <div class="row">
+            <button class="btn pv" data-in="button">Button</button>
+            <button class="btn pv" data-in="button_long">Hold button</button>
+            <button class="btn pv" data-in="timeout">Screen timeout</button>
+          </div>
+          <div class="row">
+            <button class="btn pv" data-sw="up">Swipe ↑</button><button class="btn pv" data-sw="down">Swipe ↓</button>
+            <button class="btn pv" data-sw="left">Swipe ←</button><button class="btn pv" data-sw="right">Swipe →</button>
+          </div>
+          <div class="row"><select id="pvGo" class="grow"></select><button class="btn pv" id="pvGoBtn">Open screen</button></div>
+        </div>
+        <div class="panel">
+          <h3>Simulated watch state</h3>
+          <div class="pv-data">
+            <label>Battery % <input type="number" id="pvBat" min="0" max="100" value="64"></label>
+            <label>Hour <input type="number" id="pvHour" min="0" max="23"></label>
+            <label>Minute <input type="number" id="pvMin" min="0" max="59"></label>
+            <label>Steps <input type="number" id="pvSteps" min="0" max="99999" value="6842"></label>
+            <label>Temp °C <input type="number" id="pvTemp" min="-30" max="50" value="24"></label>
+            <label><input type="checkbox" id="pvAod"> Always-on</label>
+            <label><input type="checkbox" id="pvChg"> Charging</label>
+            <label><input type="checkbox" id="pvH12"> 12-hour</label>
+          </div>
+          <div class="row"><button class="btn pv" id="pvApply">Apply</button></div>
+          <div class="log" id="pvEvents" style="max-height:160px"></div>
+        </div>
+      </div>
+    </section>
   </div>
 </main>
 <div class="toast" id="toast"></div>
@@ -300,6 +371,80 @@ $("#playSeg").onclick = e => { const b = e.target.closest("button"); if (!b) ret
 $("#hourSeg").onclick = e => { const b = e.target.closest("button"); if (!b || b.classList.contains("on")) return;
   act(null, () => api("/api/hour_format", { twelve_hour: b.dataset.v === "1" }), "Clock format updated"); };
 $("#mediaKeys").onchange = e => act(null, () => api("/api/media_keys", { on: e.target.checked }));
+const WATCH_ROWS = [["aod", "Always-on display", "Dims to a minimal screen instead of turning off"],
+  ["tw", "Tap to wake", "Uses a little more battery"], ["rw", "Raise to wake", ""], ["bw", "Press to wake", "Side button"],
+  ["h12", "12-hour time", ""], ["vib", "Tap vibration", ""]];
+function renderWatchSettings() {
+  const w = state.watch, box = $("#watchSettings");
+  if (!w) { box.innerHTML = '<p class="hint">Connect to read the watch\'s settings.</p>'; return; }
+  box.innerHTML = WATCH_ROWS.map(([k, label, hint]) =>
+    `<label class="wrow"><span>${label}${hint ? `<small>${hint}</small>` : ""}</span>` +
+    `<input type="checkbox" data-k="${k}" ${w[k] ? "checked" : ""} ${state.busy ? "disabled" : ""}></label>`).join("") +
+    '<p class="hint">At least one wake option always stays on.</p>';
+  box.querySelectorAll("input").forEach(i => i.onchange = () =>
+    act(null, () => api("/api/watch", { key: i.dataset.k, on: i.checked }), "Watch setting saved"));
+  $("#dockSeg").querySelectorAll("button").forEach(b => b.classList.toggle("on", +b.dataset.v === w.dock));
+  $("#aodBox").style.display = w.ab == null ? "none" : "block";        // firmware r1335+
+  $("#abSeg").querySelectorAll("button").forEach(b => b.classList.toggle("on", +b.dataset.v === w.ab));
+  $("#aodShow").style.display = w.aod ? "" : "none";
+}
+$("#abSeg").onclick = e => { const b = e.target.closest("button"); if (!b || b.classList.contains("on")) return;
+  act(null, () => api("/api/watch", { ab: +b.dataset.v }), "Always-on brightness saved"); };
+$("#aodShow").onclick = () => act($("#aodShow"), () => api("/api/watch", { dock: 1, show: true }), "Always-on shown");
+$("#dockSeg").onclick = e => { const b = e.target.closest("button"); if (!b || b.classList.contains("on")) return;
+  act(null, () => api("/api/watch", { dock: +b.dataset.v }), "Charger screen saved"); };
+$("#dockShow").onclick = () => { const w = state.watch; if (!w || w.dock > 2) return;
+  act($("#dockShow"), () => api("/api/watch", { dock: w.dock, show: true }), "Shown on the watch"); };
+let watchKey = "";
+
+// ---- firmware preview (emulator)
+let pvStarted = false;
+function pvData() {
+  const n = id => $(id).value === "" ? undefined : +$(id).value;
+  return { battery: n("#pvBat"), hour: n("#pvHour"), minute: n("#pvMin"), steps: n("#pvSteps"), temp: n("#pvTemp"),
+    aod: $("#pvAod").checked, charging: $("#pvChg").checked, h12: $("#pvH12").checked };
+}
+function pvShow(st) {
+  $("#pvScreen").src = "/api/fwpreview/screen.png?t=" + Date.now();
+  if (!st) return;
+  $("#pvStatus").textContent = "Screen: " + st.screen;
+  $("#pvEvents").textContent = st.events.join(" · ");
+  if ($("#pvGo").options.length !== st.screens.length)
+    $("#pvGo").innerHTML = st.screens.map(n => `<option>${n}</option>`).join("");
+}
+async function pvInput(body) {
+  if (!pvStarted) return toast("Start a preview first", "error");
+  try { const r = await api("/api/fwpreview/input", body); pvShow(r.result); } catch (e) { toast(e.message, "error"); }
+}
+async function pvLoadBuilds() {
+  try {
+    const b = await api("/api/fwpreview/builds");
+    $("#pvFw").innerHTML = b.firmware.map(f => `<option>${f}</option>`).join("");
+    $("#pvUi").innerHTML = b.ui.map(f => `<option>${f}</option>`).join("");
+  } catch (e) { $("#pvStatus").textContent = e.message; }
+}
+document.querySelector('.tab[data-view="fwpreview"]').addEventListener("click", () => { if (!$("#pvFw").options.length) pvLoadBuilds(); });
+$("#pvStart").onclick = () => act($("#pvStart"), async () => {
+  await api("/api/fwpreview/start", { firmware: $("#pvFw").value, ui: $("#pvUi").value, data: pvData() });
+  pvStarted = true; pvShow(await api("/api/fwpreview/status"));
+}, "Preview started");
+document.querySelectorAll("[data-in]").forEach(b => b.onclick = () => pvInput({ kind: b.dataset.in }));
+document.querySelectorAll("[data-sw]").forEach(b => b.onclick = () => pvInput({ kind: "swipe", dir: b.dataset.sw }));
+$("#pvGoBtn").onclick = () => pvInput({ kind: "go", name: $("#pvGo").value });
+$("#pvApply").onclick = () => pvInput({ kind: "data", data: pvData() });
+{ // click = tap, hold = long press, drag = swipe (in watch pixels: the image is shown at 240 x 280)
+  let down = null;
+  const pos = e => { const r = $("#pvScreen").getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  $("#pvScreen").addEventListener("pointerdown", e => { down = { p: pos(e), t: Date.now() }; e.preventDefault(); });
+  $("#pvScreen").addEventListener("pointerup", e => {
+    if (!down) return;
+    const [x, y] = pos(e), dx = x - down.p[0], dy = y - down.p[1], held = Date.now() - down.t;
+    const start = down.p; down = null;
+    if (Math.hypot(dx, dy) > 30)
+      pvInput({ kind: "swipe", dir: Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? "left" : "right") : (dy < 0 ? "up" : "down") });
+    else pvInput({ kind: held > 600 ? "long" : "tap", x: Math.round(start[0]), y: Math.round(start[1]) });
+  });
+}
 
 // ---- state polling
 let formsFilled = false;
@@ -327,6 +472,10 @@ async function refresh() {
   if (p) bar.firstChild.style.width = (100 * p.sent / p.total).toFixed(1) + "%";
   $("#hourSeg").querySelectorAll("button").forEach(b => b.classList.toggle("on", (b.dataset.v === "1") === !!state.twelve_hour));
   $("#mediaKeys").checked = state.media_keys;
+  const wk = JSON.stringify(state.watch) + state.busy;
+  if (wk !== watchKey) { watchKey = wk; renderWatchSettings(); }
+  $("#dockSeg").querySelectorAll("button").forEach(b => b.disabled = state.status !== "connected" || !!state.busy || !state.watch);
+  $("#abSeg").querySelectorAll("button").forEach(b => b.disabled = state.status !== "connected" || !!state.busy || !state.watch);
   if (!formsFilled) {
     formsFilled = true;
     $("#address").value = state.address; $("#city").value = state.city || "";

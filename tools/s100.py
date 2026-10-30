@@ -8,7 +8,7 @@ Usage (venv active, phone Bluetooth off so realme Fit doesn't grab the watch):
     python tools/s100.py info
     python tools/s100.py time
     python tools/s100.py notify "Hello from the PC"
-    python tools/s100.py nav "Turn right onto MG Road" 200 --remaining 12.4
+    python tools/s100.py nav right 200 "MG Road" --speed 48 --eta "14:45"   (needs app >= 1328)
     python tools/s100.py speed 48
     python tools/s100.py vibrate
     python tools/s100.py weather --city Kochi
@@ -224,23 +224,19 @@ class S100:
 
     async def car_frame(self, speed_kmh: int, direction: str, dist_m: int,
                         street: str, eta: str = "", remaining_km: float | None = None) -> bool:
-        """One car-display frame as a formatted notification. Call repeatedly to keep lit.
-
-        `direction` uses plain words (RIGHT/LEFT/STRAIGHT/...) since the watch font
-        has no arrow glyphs (verified 2026-10-28).
-        """
-        dist = f"{dist_m/1000:.1f}km" if dist_m >= 1000 else f"{dist_m}m"
-        line = f"{speed_kmh} km/h  {direction} {dist}  {street}"
+        """One frame for the navigation screen of firmware mod c2_features (app >= 1328): the watch
+        shows it on its own screen (arrow, distance, street, speed, ETA) instead of a popup, without
+        storing it in the notification history. It goes back to the face after 90 s without frames."""
         if remaining_km is not None:
-            line += f"  ({remaining_km:.1f}km left{(' '+eta) if eta else ''})"
-        return await self.notify(line, app_type=TYPE_OTHER)
+            eta = f"{remaining_km:.1f} km  {eta}".strip()
+        return await self.notify(nav_text(direction, dist_m, street, f"{speed_kmh} km/h", eta), app_type=TYPE_OTHER)
 
     async def car_demo(self, seconds: float):
         """Simulated approach-to-turn so the car-display UI can be judged on-device."""
         loop = asyncio.get_running_loop()
         end = loop.time() + seconds
         dist, speed, remaining = 800, 52, 12.4
-        steps = [("RIGHT", "MG Road"), ("STRAIGHT", "Ring Road"), ("LEFT", "NH-66")]
+        steps = [("right", "MG Road"), ("straight", "Ring Road"), ("left", "NH-66")]
         si = 0
         while loop.time() < end:
             direction, street = steps[si % len(steps)]
@@ -255,12 +251,15 @@ class S100:
         print("car demo done")
 
 
-def nav_text(instruction: str, distance_m: float, remaining_km: float | None = None) -> str:
+NAV_DIRS = {"straight": "S", "left": "L", "right": "R", "slight-left": "l", "slight-right": "r",
+            "uturn": "U", "arrive": "A", "roundabout": "O"}
+
+
+def nav_text(direction: str, distance_m: float, street: str, speed: str = "", eta: str = "") -> str:
+    """'NAV|dir|dist|street|speed|eta', read by the c2_features navigation screen (ext.c nav_check)."""
+    d = NAV_DIRS.get(direction.lower(), direction[:1] or "S")
     dist = f"{distance_m / 1000:.1f} km" if distance_m >= 1000 else f"{int(round(distance_m, -1))} m"
-    text = f"{dist} | {instruction}"
-    if remaining_km is not None:
-        text += f" | {remaining_km:.1f} km left"
-    return text
+    return f"NAV|{d}|{dist}|{street[:39]}|{speed[:15]}|{eta[:23]}"
 
 
 async def main():
@@ -270,8 +269,9 @@ async def main():
     sub.add_parser("info")
     sub.add_parser("time")
     pn = sub.add_parser("notify"); pn.add_argument("text"); pn.add_argument("--type", type=int, default=TYPE_OTHER)
-    pv = sub.add_parser("nav"); pv.add_argument("instruction"); pv.add_argument("distance_m", type=float)
-    pv.add_argument("--remaining", type=float)
+    pv = sub.add_parser("nav", help="show one frame on the navigation screen (app >= 1328)")
+    pv.add_argument("direction", choices=sorted(NAV_DIRS)); pv.add_argument("distance_m", type=float)
+    pv.add_argument("street"); pv.add_argument("--speed", default=""); pv.add_argument("--eta", default="")
     ps = sub.add_parser("speed"); ps.add_argument("kmh", type=float)
     pb = sub.add_parser("vibrate"); pb.add_argument("times", type=int, nargs="?", default=1)
     pw = sub.add_parser("weather", help="demo forecast")
@@ -301,7 +301,8 @@ async def main():
         elif args.cmd == "notify":
             print("ok" if await w.notify(args.text, args.type) else "failed")
         elif args.cmd == "nav":
-            print("ok" if await w.notify(nav_text(args.instruction, args.distance_m, args.remaining)) else "failed")
+            print("ok" if await w.notify(nav_text(args.direction, args.distance_m, args.street, args.speed,
+                                                   args.eta)) else "failed")
         elif args.cmd == "speed":
             print("ok" if await w.notify(f"Speed {args.kmh:.0f} km/h") else "failed")
         elif args.cmd == "vibrate":

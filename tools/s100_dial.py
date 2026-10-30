@@ -235,7 +235,7 @@ def compose_sample(els, sample: dict[int, str]) -> Image.Image:
 
 
 def build(out: Path, design: str = "classic") -> Path:
-    if design in ("nothing", "widgets", "dashboard", "duo", "duo2", "duo3", "duo4", "duo5", "duo6", "blob", "dusk", "world", "widgetsdot"):
+    if design in ("nothing", "widgets", "dashboard", "duo", "duo2", "duo3", "duo4", "duo5", "duo6", "blob", "dusk", "world", "widgetsdot", "grid"):
         mod = __import__(f"dial_{design}")
         els = mod.layout()
         face = compose_sample(els, mod.SAMPLE)
@@ -355,7 +355,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     pb = sub.add_parser("build")
-    pb.add_argument("design", nargs="?", choices=["classic", "nothing", "widgets", "dashboard", "duo", "duo2", "duo3", "duo4", "duo5", "duo6", "blob", "dusk", "world", "widgetsdot"], default="nothing")
+    pb.add_argument("design", nargs="?", choices=["classic", "nothing", "widgets", "dashboard", "duo", "duo2", "duo3", "duo4", "duo5", "duo6", "blob", "dusk", "world", "widgetsdot", "grid"], default="nothing")
     pb.add_argument("-o", "--out")
     pu = sub.add_parser("upload")
     pu.add_argument("file", nargs="?", default=str(OUT_DIR / "nothing.bin"))

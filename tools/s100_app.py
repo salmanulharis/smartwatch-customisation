@@ -233,19 +233,38 @@ class Busy(Exception):
 
 
 class WatchLink(S100):
-    """S100 session that routes watch-initiated events (d1 xx) away from command replies."""
+    """S100 session that routes watch-initiated events (d1 xx) and settings reports (7e) away from
+    command replies."""
 
-    def __init__(self, address: str, on_event, on_disconnect):
+    def __init__(self, address: str, on_event, on_disconnect, on_settings=None):
         super().__init__(address)
         self.client = BleakClient(address, timeout=20, disconnected_callback=lambda _c: on_disconnect())
         self.on_event = on_event
+        self.on_settings = on_settings
 
     def _on_notify(self, _sender, data: bytearray):
         data = bytes(data)
         if data[:1] == b"\xd1":
             self.on_event(data)
+        elif data[:2] == b"\x7e\x01" and self.on_settings:
+            self.on_settings(data)
         else:
             self.queue.put_nowait(data)
+
+
+# Watch settings report (firmware c7, ext.c t_report): 7E 01 aod tap raise press dock h12 vib battery
+# [aod_level] (the last byte from firmware c8 / r1335: always-on backlight 0 dimmest - 3)
+WATCH_KEYS = {"aod": 2, "tw": 3, "rw": 4, "bw": 5, "h12": 7, "vib": 8}
+
+
+def parse_watch_settings(d: bytes) -> dict | None:
+    if len(d) < 10 or d[:2] != b"\x7e\x01":
+        return None
+    out = {k: bool(d[i]) for k, i in WATCH_KEYS.items()}
+    out["dock"] = d[6]
+    out["battery"] = d[9]
+    out["ab"] = d[10] if len(d) > 10 else None
+    return out
 
 
 class Manager:
@@ -254,6 +273,7 @@ class Manager:
     def __init__(self):
         self.cfg = load_config()
         self.faces = load_faces()
+        self.fw_preview = None                     # s100_preview.Preview: built firmware in the emulator
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
         self.link: WatchLink | None = None
@@ -262,7 +282,7 @@ class Manager:
         self.log_seq = 0
         self.logs: collections.deque = collections.deque(maxlen=200)
         self.st = {"status": "disconnected", "battery": None, "battery_at": None, "app_rev": None, "version": "",
-                   "busy": None, "progress": None, "last_event": None, "weather": None}
+                   "busy": None, "progress": None, "last_event": None, "weather": None, "watch": None}
         self.log("Ready. Turn off phone Bluetooth so realme Fit doesn't hold the watch.")
 
     # --- state helpers
@@ -329,6 +349,16 @@ class Manager:
             self.set(status="disconnected")
             self.log("Watch disconnected.", "warn")
 
+    def _on_settings(self, data: bytes) -> None:
+        """The watch's own settings (source of truth): sent on CFG|get and after any change on it."""
+        ws = parse_watch_settings(data)
+        if ws is None:
+            return
+        self.set(watch=ws)
+        if self.cfg["twelve_hour"] != ws["h12"]:
+            self.cfg["twelve_hour"] = ws["h12"]
+            save_config(self.cfg)
+
     def _on_event(self, data: bytes) -> None:
         code = data[1] if len(data) > 1 else -1
         label = BUTTONS.get(code, f"event {data.hex(' ')}")
@@ -374,7 +404,7 @@ class Manager:
             return
         self.set(status="connecting")
         self.log(f"Connecting to {self.cfg['address']} … (accept the pairing prompt on the watch if shown)")
-        link = WatchLink(self.cfg["address"], self._on_event, self._on_disconnect)
+        link = WatchLink(self.cfg["address"], self._on_event, self._on_disconnect, self._on_settings)
         try:
             await link.__aenter__()
         except Exception as e:
@@ -397,6 +427,10 @@ class Manager:
             self.log(f"firmware revision read failed: {e}", "warn")
         self.set(version=await link.version())
         await link.sync_time()
+        try:
+            await link.notify("CFG|get")                   # firmware c7+: replies with a 7E report
+        except Exception as e:  # noqa: BLE001
+            self.log(f"settings read failed: {e}", "warn")
         self._poll_task = asyncio.create_task(self._poll(link))
         self.log(f"Connected. Firmware {self.st['version'] or '?'} (app revision {self.st['app_rev']}), "
                  f"battery {self.st['battery']}%. Time synced.")
@@ -483,12 +517,29 @@ class Manager:
         self.log(f"Music info sent: {title.strip()[:52]} ({'playing' if playing else 'paused'}).")
 
     def hour_format(self, twelve: bool):
-        reply = self.run("setting clock format", lambda: self.link.units(twelve))
-        if reply is None:
-            raise RuntimeError("watch did not acknowledge the clock format")
-        self.cfg["twelve_hour"] = twelve
-        save_config(self.cfg)
-        self.log(f"Clock set to {'12' if twelve else '24'}-hour.")
+        self.watch_set("h12", twelve)
+
+    def watch_set(self, key: str, on: bool):
+        """One display / wake setting on the watch; the watch answers with its full report."""
+        if key not in WATCH_KEYS:
+            raise ValueError(f"unknown setting {key}")
+        ok = self.run("changing a watch setting", lambda: self.link.notify(f"CFG|{key}={1 if on else 0}"))
+        if not ok:
+            raise RuntimeError("watch did not acknowledge the setting")
+
+    def aod_level(self, level: int):
+        """Always-on backlight level on the watch (0 dimmest - 3), separate from the normal brightness."""
+        level = _clamp(level, 0, 3)
+        if not self.run("changing the always-on brightness", lambda: self.link.notify(f"CFG|ab={level}")):
+            raise RuntimeError("watch did not acknowledge the setting")
+
+    def dock(self, style: int, show: bool = False):
+        style = _clamp(style, 0, 3)
+        cmd = f"CFG|show={style}" if show else f"CFG|dock={style}"
+        if show and style > 2:
+            raise ValueError("nothing to show for 'off'")
+        if not self.run("changing the charger screen", lambda: self.link.notify(cmd)):
+            raise RuntimeError("watch did not acknowledge the setting")
 
     def profile(self, p: dict):
         clean = {"height_cm": _clamp(p.get("height_cm"), 100, 250), "weight_kg": _clamp(p.get("weight_kg"), 20, 250),
@@ -611,6 +662,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, render(face, m.live_values()), "image/png")
             except Exception as e:  # noqa: BLE001
                 return self._json({"error": f"preview failed: {e}"}, 500)
+        if url.path.startswith("/api/fwpreview/"):
+            try:
+                import s100_preview                       # needs unicorn (offline emulator)
+                if url.path == "/api/fwpreview/builds":
+                    return self._json(s100_preview.builds())
+                pv = m.fw_preview
+                if pv is None:
+                    return self._json({"error": "start a preview first"}, 404)
+                if url.path == "/api/fwpreview/screen.png":
+                    return self._send(200, pv.png(), "image/png")
+                if url.path == "/api/fwpreview/status":
+                    return self._json(pv.status())
+            except ImportError as e:
+                return self._json({"error": f"preview needs the emulator packages: {e}"}, 500)
         if url.path == "/api/thumb" and face:
             png = face.path.with_suffix(".png")
             if png.exists():
@@ -662,6 +727,39 @@ class Handler(BaseHTTPRequestHandler):
                 result = {"city": place, "current": cur, "days": days}
             elif path == "/api/music":
                 m.music(str(body.get("title", "")), bool(body.get("playing", True)))
+            elif path == "/api/watch":
+                if "dock" in body:
+                    m.dock(body.get("dock"), bool(body.get("show")))
+                elif "ab" in body:
+                    m.aod_level(body.get("ab"))
+                else:
+                    m.watch_set(str(body.get("key", "")), bool(body.get("on")))
+            elif path == "/api/fwpreview/start":
+                import s100_preview
+                m.fw_preview = s100_preview.Preview(str(body.get("firmware", "")), str(body.get("ui", "")),
+                                                    body.get("data") or {})
+            elif path == "/api/fwpreview/input":
+                pv = m.fw_preview
+                if pv is None:
+                    raise ValueError("start a preview first")
+                kind = body.get("kind")
+                if kind in ("tap", "long"):
+                    pv.tap(_clamp(body.get("x"), 0, 239), _clamp(body.get("y"), 0, 279), long=kind == "long")
+                elif kind == "swipe":
+                    if body.get("dir") not in ("left", "right", "up", "down"):
+                        raise ValueError("bad swipe direction")
+                    pv.swipe(body["dir"])
+                elif kind in ("button", "button_long"):
+                    pv.button(long=kind == "button_long")
+                elif kind == "timeout":
+                    pv.timeout()
+                elif kind == "go":
+                    pv.go(str(body.get("name", "")))
+                elif kind == "data":
+                    pv.update(body.get("data") or {})
+                else:
+                    raise ValueError("unknown input")
+                result = pv.status()
             elif path == "/api/hour_format":
                 m.hour_format(bool(body.get("twelve_hour")))
             elif path == "/api/profile":

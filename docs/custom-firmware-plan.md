@@ -11,6 +11,14 @@ element type 71 as an offset clock digit (4 cities, emulator-tested). Ready to f
 
 ---
 
+## Favourites
+
+Features the owner marked as favourites (keep them working in every release; add new ones here).
+
+| # | Feature | Since | Where |
+|---|---|---|---|
+| 1 | **Always-on display** — dims to a minimal dot-matrix screen (time, date, weather, battery, steps) at minimum backlight instead of turning off; also on the charger. Switch on the watch (quick panel tile, Watch settings), in the Android app and in the Windows app | app r1334 (`c7_wake`); redesigned after the reference with its own brightness (4 levels) and wrist-down → AOD in r1335 (`c8_aod`, installed) | `firmware/s100_ext/ext.c` (`aod_*`, `t_aod_body`, `t_dock_timeout`, `t_wrist_down`), screen-off hook 0x84236C, `docs/ui-upgrade-plan.md` §12.10–12.12 |
+
 ## Goal
 
 Replace the stock watch UI with our own, removing all stock watch functions. Target features:
@@ -200,8 +208,26 @@ python tools\s100_gatt_dump.py     # ffd4 should read 00 80 52 00
 - **Exit:** menus show only kept items; no crashes navigating.
 
 ### B4. Reskin
-- Decode UI resource pack `RH288A_V000957_U0006_ui.bin` (images/fonts) and how it's delivered;
-  replace graphics.
+- Goal (2026-10-29): full CMF-Watch-style restyle of every screen, **keeping all stock features**,
+  the 240×280 layout and the stock scrolling/list behaviour.
+- **Decoded** (2026-10-29): 2,163 row-RLE RGB565 images + ~350 KB raw tail, payload at flash
+  `0xACB400`, CRC-32 header; format and reskin rules in `docs/ui-resource-format.md`; exporter
+  `tools/s100_ui.py export`.
+- Encoder (byte-identical on all stock images) + in-place build done. One-icon test pack
+  (Settings gear 1273, UI revision 1) flashed 2026-10-29: `ValidateFW 100301`, watch back up.
+  Batch 1 (UI revision 2, 2026-10-29): all 34 app icons (64 px grid set 1144-1160 + 48 px list set
+  1258-1274) in CMF style, `ValidateFW 100301`, watch back up.
+  Batch 2 (UI revision 3, 2026-10-29): CMF colour theme on every other image (`tools/ui_cmf.py`:
+  bright accents → orange, dark tints → grey, neutrals kept; 981 recoloured, 16 left stock). Two
+  transfers dropped (62 %, 85 %; BLE "Unreachable"), the watch kept running each time; installed
+  on the 4th try (`ValidateFW 100301`).
+  Batch 3 (UI revision 4, 2026-10-29): text re-rendered in Bahnschrift (`tools/ui_cmf_text.py`;
+  236 labels from `tools/ui_labels.json` = Windows OCR + manual fixes, 35 digit sets), on top of
+  icons + theme; first-try install. Next UI pack ≥ 5. Next: layouts + features (UI framework map in
+  `docs/ui-framework-notes.md`).
+- 2026-10-30: scope widened from reskin to a structural UI upgrade (layout, navigation, motion,
+  haptics, new screens); plan and firmware limits in [ui-upgrade-plan.md](ui-upgrade-plan.md).
+  Waiting for the owner's go-ahead (P0/P1 first, no flashing).
 - **Exit:** new look across screens.
 
 ### B5. Custom screens (code injection)
@@ -221,7 +247,14 @@ python tools\s100_gatt_dump.py     # ffd4 should read 00 80 52 00
   `research/mods/b5_worldclock_v1323.bin`. Face: `tools/dial_world.py` (2×2 grid Mumbai /
   New York / Dubai / London; offsets computed for the build date incl. US/UK DST, so rebuild and
   re-upload after a DST change).
-- Next: nav/music/notification screens fed by UTE commands (`tools/s100.py`).
+- **Fix, v1324 (`b5b_worldclock`, installed 2026-10-29):** `0x89491C` turned out to be inside the
+  flash range `0x8941AC`-`0x8974D0` that startup (`0x829A64`) copies to RAM `0x20BD14` as the initial
+  values of RAM variables, so v1323 started RAM `0x20C484`-`0x20C506` (app state) with handler bytes.
+  The handler now lives at `0x84D434` in the dead FactoryAgingTest build function (entry `0x84D432`
+  = `bx lr`; only caller is the factory screen at `0x84DB56`; no literal loads into the range).
+  Hook re-encoded (`b.w 0x84D434`); handler body identical. Next app image ≥ 1325.
+- Next: nav/music/notification screens fed by UTE commands (`tools/s100.py`); UI framework map in
+  `docs/ui-framework-notes.md`.
 - **Exit:** custom screens reachable from the watch, fed live from the PC/phone.
 
 Track B limits: bound to the stock architecture; large UI changes get hard. If Track A becomes
