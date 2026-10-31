@@ -116,10 +116,48 @@ REPLACE = {343: grid_background,             # slot 3 background (stock "planet"
 REPLACE.update({440 + k: weekday_word(n) for k, n in enumerate(["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"])})
 
 
+# ---- face-picker previews: the picker shows one fixed 240 x 280 image per built-in face (stock bezel +
+# glow around a picture of the face). Redrawn from the new faces as the firmware draws them (emulator),
+# so they need a built app + pack: python tools/ui_dials_art.py --previews APP.bin PACK.bin
+PREVIEWS = {426: "WatchScreenD2687001UI",      # slot 1 Dashboard (WatchPreview1)
+            345: "WatchScreenD2640001UI"}      # slot 3 Grid (WatchPreview3); slot 2 (IMG169) stays stock
+PV_SCREEN = (27, 30, 213, 250)               # the stock bezel's inner screen
+
+
+def face_previews(app_rel: str, pack_rel: str) -> dict[int, Image.Image]:
+    import s100_preview as PV
+    import s100_screens as S
+    from s100_ui import UI_BIN
+    stock = S.Art(UI_BIN.read_bytes(), None)
+    p = PV.Preview(app_rel, pack_rel, {"hour": 10, "minute": 8, "steps": 6842, "battery": 76})
+    x0, y0, x1, y1 = PV_SCREEN
+    w, h = x1 - x0, y1 - y0
+    mask = Image.new("L", (w * SS, h * SS), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, w * SS - 1, h * SS - 1], radius=24 * SS, fill=255)
+    mask = mask.resize((w, h), Image.LANCZOS)
+    out = {}
+    for i, screen in PREVIEWS.items():
+        p.go(screen)
+        face = S.draw(p.sim, p.art, p.sim.widgets("cur")).convert("RGB").resize((w, h), Image.LANCZOS)
+        im = stock.by_index(i).convert("RGB")
+        inner = Image.new("RGB", (w, h), (0, 0, 0))
+        inner.paste(face, (0, 0), mask)
+        im.paste(inner, (x0, y0), mask)
+        out[i] = im
+    return out
+
+
 def main() -> None:
+    import sys
     from s100_ui import UI_BIN, payload, walk
     out = Path(__file__).resolve().parent.parent / "research" / "ui" / "replace"
     images, _ = walk(payload(UI_BIN.read_bytes()))
+    if "--previews" in sys.argv:
+        app_rel, pack_rel = sys.argv[sys.argv.index("--previews") + 1:][:2]
+        for i, im in face_previews(app_rel, pack_rel).items():
+            G.fit(im, images[i][1]).save(out / f"{i:04d}.png")
+        print(f"{len(PREVIEWS)} face previews -> {out}")
+        return
     for i, fn in REPLACE.items():
         G.fit(fn(), images[i][1]).save(out / f"{i:04d}.png")
     print(f"{len(REPLACE)} backgrounds -> {out}")

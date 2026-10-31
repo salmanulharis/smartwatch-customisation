@@ -930,4 +930,9 @@ Breathe screen after the owner's reference (same c14 build):
   breath track ring tinted by the slot fitter's fallback palette in some frames (frames now use a fixed
   palette and a crisp 1 px ring), white digits / START / chevron given explicit palettes for the same
   reason. Every in-place image now fits its slot without the fitter's reduction.
+- Installed 2026-10-31: UI pack rev 16 + app v1341 (ffd4 00 d0 53 00). Then UI pack rev 17 (pack only):
+  the face picker (WatchPreview1-3) shows one fixed 240 x 280 image per built-in face (IMG426 / 169 /
+  345), which still showed the stock designs. Slot 1 and 3 previews are now rendered from the new faces
+  by the firmware in the emulator and placed in the stock bezel (`ui_dials_art.py --previews APP PACK`,
+  screen 27,30-213,250). Regenerate them whenever a built-in face changes.
 
