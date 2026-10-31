@@ -207,6 +207,8 @@ if FEATURE_PACK_V16.with_suffix(".append.json").exists():
         return [p for p in MODS["c1_layout"][1] if p[0] not in _LIST93] + _ext_build(FEATURE_PACK_V16)
     MODS["c14_nav"] = (1341, _c14, "c13 + navigation: text fitted (two street lines, ellipsis), unit beside "
                        "the distance, 16 arrows (sharp / keep / merge / exit / U-turn right) (pairs with ui_v16)")
+    MODS["c15_faces"] = (1342, _c14, "c14 (installed) + face picker ring fixed: 1 <-> 2 <-> 3 <-> uploaded "
+                         "face <-> 1 in both directions (pairs with ui_v16 / ui_v17: same addresses)")
 
 
 def grow_image(data: bytearray) -> None:

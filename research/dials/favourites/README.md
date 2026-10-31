@@ -3,6 +3,7 @@
 | Name | File | Notes |
 |---|---|---|
 | Dot-matrix (Nothing style) | `dotmatrix-nothing.bin` | 12-hour time, AM/PM, weekday + date, phone dot, 11-step battery, weather icon + temp. Saved 2026-10-29. |
+| One Dot (refined Nothing) | `onedot.bin` | The dot-matrix face refined: single-stroke 5x9 dot time with one red dot as the colon (the signature), weekday + date and AM/PM + Bluetooth dot on top, full-width step-goal dot line, weather and steps under tiny dot labels, ten battery dots. 24 sprites. Built 2026-10-31 (`s100_dial.py build onedot`). |
 | Widgets (dot-matrix time + cards) | `widgets-dotmatrix.bin` | Weekday, BT, battery pill, 12-h time, weather card (icon + condition + temp), date card, heart-rate card, battery ring with exact % (type 33), connection ring. Saved 2026-10-29. |
 | Widgets + mini analog clock | `widgets-analog.bin` | Same as widgets, but the battery ring is replaced by a mini analog clock (hour/minute hands rotated by the watch). Saved 2026-10-29. |
 | Duo (light theme) | `duo.bin` | Cream background, hour on a dark pill + minutes on a coral circle (chunky dot digits), AM/PM bubble, weekday + date, Bluetooth + battery pill, weather, dot-matrix heart rate. Saved 2026-10-29. |
@@ -22,3 +23,7 @@ Re-install any of them (venv active, phone Bluetooth off):
 ```
 python tools\s100_dial.py upload research\dials\favourites\<file>.bin
 ```
+
+All faces here carry the framed picker preview (type 10, 240 x 280, the built-in faces' bezel), so
+they look the same as the built-in faces in the face picker; `s100_dial.py reframe FILE` applies it
+to an older face file without changing anything else in it.

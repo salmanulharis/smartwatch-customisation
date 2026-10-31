@@ -415,6 +415,16 @@ def build(pack: Path = PACK) -> list[tuple[int, str, str]]:
     # SpO2 screen: build wrapped (descriptor init 0x895DD0: +0x1C build, +0x33 capacity 18 -> 32)
     patch(0x00895DD0 + 0x1C, struct.pack("<I", S["t_spo2_build"]), struct.pack("<I", 0x0084A9D3))
     patch(0x00895DD0 + 0x33, bytes([32]), bytes([18]))
+    # face picker ring (WatchPreview1-3 + WatchOnlinePreview for an uploaded face). Stock splices the
+    # uploaded face into the ring by replacing *both* of preview 2's neighbours (0x85E29C: left == P1
+    # -> Online, right == P3 -> Online), so swiping right went 1 2 Online 3 and swiping left 1 3 2 Online:
+    # faces repeated / came at the wrong time. Now 1 <-> 2 <-> 3 <-> Online <-> 1 both ways: P1's left
+    # (P3) and P3's right (P1) become Online, and Online's own left / right are P3 / P1 (swapped loads).
+    for addr, old, new in [(0x0085E2B6, "ldr r1, [pc, #0x2c8]", "ldr r1, [pc, #0x2d0]"),   # left == P3
+                           (0x0085E2C2, "ldr r1, [pc, #0x2c4]", "ldr r1, [pc, #0x2bc]"),   # right == P1
+                           (0x0085E16E, "ldr r0, [pc, #0xd8]", "ldr r0, [pc, #0xdc]"),     # Online left = P3
+                           (0x0085E172, "ldr r1, [pc, #0xd8]", "ldr r1, [pc, #0xd4]")]:    # Online right = P1
+        patch(addr, asm(new, addr), asm(old, addr))
     # Breathe screen: build wrapped (descriptor init 0x895E0C +0x1C); breath timer at twice the rate
     # and twice the count per phase (22 ticks: same phase length, smoother animation): event handler
     # 0x84B700 (period per pace, toggle at count 21) and enter 0x84B7EA (period when resuming)

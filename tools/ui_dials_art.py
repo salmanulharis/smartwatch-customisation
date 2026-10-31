@@ -124,26 +124,38 @@ PREVIEWS = {426: "WatchScreenD2687001UI",      # slot 1 Dashboard (WatchPreview1
 PV_SCREEN = (27, 30, 213, 250)               # the stock bezel's inner screen
 
 
-def face_previews(app_rel: str, pack_rel: str) -> dict[int, Image.Image]:
-    import s100_preview as PV
+def framed_preview(face: Image.Image, base: int = 345) -> Image.Image:
+    """A 240 x 280 face shown the way the picker shows faces: shrunk into the stock bezel + glow
+    (taken from stock preview IMG`base`, its inner picture replaced). Built-in and uploaded faces
+    (tools/s100_dial.py, type-10 preview) use the same treatment."""
     import s100_screens as S
     from s100_ui import UI_BIN
-    stock = S.Art(UI_BIN.read_bytes(), None)
-    p = PV.Preview(app_rel, pack_rel, {"hour": 10, "minute": 8, "steps": 6842, "battery": 76})
     x0, y0, x1, y1 = PV_SCREEN
     w, h = x1 - x0, y1 - y0
     mask = Image.new("L", (w * SS, h * SS), 0)
     ImageDraw.Draw(mask).rounded_rectangle([0, 0, w * SS - 1, h * SS - 1], radius=24 * SS, fill=255)
     mask = mask.resize((w, h), Image.LANCZOS)
+    im = S.Art(UI_BIN.read_bytes(), None).by_index(base).convert("RGB")
+    # clear the stock picture right up to the bezel ring first (it showed through between the face's
+    # rounded corners and the ring)
+    clear = Image.new("L", (240 * SS, 280 * SS), 0)
+    ImageDraw.Draw(clear).rounded_rectangle([(x0 - 2) * SS, (y0 - 2) * SS, (x1 + 2) * SS, (y1 + 2) * SS],
+                                            radius=26 * SS, fill=255)
+    im.paste((0, 0, 0), (0, 0), clear.resize((240, 280), Image.LANCZOS).point(lambda v: 255 if v > 127 else 0))
+    inner = Image.new("RGB", (w, h), (0, 0, 0))
+    inner.paste(face.convert("RGB").resize((w, h), Image.LANCZOS), (0, 0), mask)
+    im.paste(inner, (x0, y0), mask)
+    return im
+
+
+def face_previews(app_rel: str, pack_rel: str) -> dict[int, Image.Image]:
+    import s100_preview as PV
+    import s100_screens as S
+    p = PV.Preview(app_rel, pack_rel, {"hour": 10, "minute": 8, "steps": 6842, "battery": 76})
     out = {}
     for i, screen in PREVIEWS.items():
         p.go(screen)
-        face = S.draw(p.sim, p.art, p.sim.widgets("cur")).convert("RGB").resize((w, h), Image.LANCZOS)
-        im = stock.by_index(i).convert("RGB")
-        inner = Image.new("RGB", (w, h), (0, 0, 0))
-        inner.paste(face, (0, 0), mask)
-        im.paste(inner, (x0, y0), mask)
-        out[i] = im
+        out[i] = framed_preview(S.draw(p.sim, p.art, p.sim.widgets("cur")), i)
     return out
 
 

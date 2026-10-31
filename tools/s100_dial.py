@@ -5,6 +5,7 @@ Format and protocol: docs/custom-dial-format.md. The face is a desk clock: white
 
 Usage (venv active, phone Bluetooth off):
     python tools/s100_dial.py build                 # writes research/dials/deskclock.bin + preview PNG
+    python tools/s100_dial.py reframe file.bin [-o out.bin]   # framed picker preview, nothing else changed
     python tools/s100_dial.py upload [file.bin] [-v]
 """
 from __future__ import annotations
@@ -234,17 +235,71 @@ def compose_sample(els, sample: dict[int, str]) -> Image.Image:
     return face
 
 
+def _file(records: bytes, blocks: list[bytes]) -> bytes:
+    """Header + element table + data, as the watch expects."""
+    body = records + b"\0\0" + b"".join(blocks)
+    # The watch fails the upload ("CRC check failed") when the last 4 KB sector is within one
+    # packet of being full (seen with 524190 B = 3998 mod 4096). Trailing padding avoids it.
+    rem = (24 + len(body)) % 4096
+    if rem == 0 or rem > 4096 - 256:
+        body += bytes(4096 - rem + 128)
+    header = bytearray(b"\xff" * 4 + struct.pack("<I", 24 + len(body) - 24) + b"\0" * 4
+                       + struct.pack("<HH", W, H) + bytes([0, 1, 0xFF]) + b"\xff" * 5)
+    struct.pack_into("<I", header, 8, zlib.crc32(body) & 0xFFFFFFFF)
+    blob = bytes(header) + body
+    if len(blob) > 0x100000:
+        raise SystemExit(f"dial too large: {len(blob)} bytes")
+    return blob
+
+
+def reframe(src: Path, out: Path) -> Path:
+    """Give an already built face the current picker preview (type 10: full screen, framed like the
+    built-in faces) without rebuilding it from its design, so nothing else in the face changes. The
+    face picture comes from the old preview (the 240 x 240 thumbnail held it at x 17, 206 x 240)."""
+    from ui_dials_art import PV_SCREEN, framed_preview
+    data = src.read_bytes()
+    recs, o = [], 24
+    while struct.unpack_from("<H", data, o)[0]:
+        recs.append(struct.unpack_from("<HHIHHHHB7s", data, o))
+        o += 24
+    data_off = (len(recs) + 1) * 24 + 2
+    blocks: list[bytes] = []
+    where: dict[bytes, int] = {}
+    records = bytearray()
+    for t, w, off, h, x, y, unk, nf, res in recs:
+        blob = data[off:off + w * h * 2 * nf]
+        if t == 10:
+            px = struct.unpack(f">{w * h}H", blob)
+            old = Image.new("RGB", (w, h))
+            old.putdata([((v >> 11) << 3, ((v >> 5) & 63) << 2, (v & 31) << 3) for v in px])
+            face = old.crop((17, 0, 223, 240)) if (w, h) == (240, 240) else old.crop(PV_SCREEN)
+            new = framed_preview(face.resize((W, H), Image.LANCZOS))
+            w, h, x, y, nf, blob = W, H, 0, 0, 1, rgb565_be(new)
+        if blob not in where:
+            where[blob] = data_off + sum(len(b) for b in blocks)
+            blocks.append(blob)
+        records += struct.pack("<HHIHHHHB7s", t, w, where[blob], h, x, y, unk, nf, res)
+    out.write_bytes(_file(bytes(records), blocks))
+    print(f"reframed {src} -> {out} ({out.stat().st_size} bytes)")
+    return out
+
+
 def build(out: Path, design: str = "classic") -> Path:
-    if design in ("nothing", "widgets", "dashboard", "duo", "duo2", "duo3", "duo4", "duo5", "duo6", "blob", "dusk", "world", "widgetsdot", "grid"):
+    if design in ("nothing", "widgets", "dashboard", "duo", "duo2", "duo3", "duo4", "duo5", "duo6", "blob", "dusk", "world", "widgetsdot", "grid", "onedot"):
         mod = __import__(f"dial_{design}")
         els = mod.layout()
         face = compose_sample(els, mod.SAMPLE)
     else:
         els = layout()
         face = compose_preview(els)
-    thumb = Image.new("RGB", (240, 240), BG)
-    small = face.resize((206, 240), Image.LANCZOS)
-    thumb.paste(small, (17, 0))
+    # type-10 preview = what the face picker (WatchOnlinePreview) draws, at its own size: full screen,
+    # framed like the built-in faces' previews (stock bezel + glow; tools/ui_dials_art.py)
+    try:
+        from ui_dials_art import framed_preview
+        thumb = framed_preview(face)
+    except (ImportError, FileNotFoundError, OSError):          # no stock UI pack here: plain thumbnail
+        thumb = Image.new("RGB", (240, 280), BG)
+        thumb.paste(face.resize((186, 220), Image.LANCZOS), (27, 30))
     els.append((10, 0, 0, [thumb]))
     els.sort(key=lambda e: e[0])
 
@@ -266,19 +321,7 @@ def build(out: Path, design: str = "classic") -> Path:
         records += struct.pack("<HHIHHHHB7s", t, w, off, h, x, y, 0, len(frames),
                                o.get("reserved", b"\0" * 7))
 
-    body = bytes(records) + b"\0\0" + b"".join(blocks)
-    # The watch fails the upload ("CRC check failed") when the last 4 KB sector is within one
-    # packet of being full (seen with 524190 B = 3998 mod 4096). Trailing padding avoids it.
-    rem = (24 + len(body)) % 4096
-    if rem == 0 or rem > 4096 - 256:
-        body += bytes(4096 - rem + 128)
-    header = bytearray(b"\xff" * 4 + struct.pack("<I", 24 + len(body) - 24) + b"\0" * 4
-                       + struct.pack("<HH", W, H) + bytes([0, 1, 0xFF]) + b"\xff" * 5)
-    struct.pack_into("<I", header, 8, zlib.crc32(body) & 0xFFFFFFFF)
-    blob = bytes(header) + body
-    if len(blob) > 0x100000:
-        raise SystemExit(f"dial too large: {len(blob)} bytes")
-
+    blob = _file(bytes(records), blocks)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(blob)
     face.save(out.with_suffix(".png"))
@@ -355,15 +398,21 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     pb = sub.add_parser("build")
-    pb.add_argument("design", nargs="?", choices=["classic", "nothing", "widgets", "dashboard", "duo", "duo2", "duo3", "duo4", "duo5", "duo6", "blob", "dusk", "world", "widgetsdot", "grid"], default="nothing")
+    pb.add_argument("design", nargs="?", choices=["classic", "nothing", "widgets", "dashboard", "duo", "duo2", "duo3", "duo4", "duo5", "duo6", "blob", "dusk", "world", "widgetsdot", "grid", "onedot"], default="nothing")
     pb.add_argument("-o", "--out")
+    pr = sub.add_parser("reframe", help="give a built face the framed picker preview")
+    pr.add_argument("file")
+    pr.add_argument("-o", "--out")
     pu = sub.add_parser("upload")
     pu.add_argument("file", nargs="?", default=str(OUT_DIR / "nothing.bin"))
     pu.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args()
-    if a.cmd == "build":
+    if a.cmd in ("build", "reframe"):
         sys.path.insert(0, str(Path(__file__).resolve().parent))
+    if a.cmd == "build":
         build(Path(a.out) if a.out else OUT_DIR / f"{a.design}.bin", a.design)
+    elif a.cmd == "reframe":
+        reframe(Path(a.file), Path(a.out) if a.out else Path(a.file))
     else:
         ok = asyncio.run(upload(Path(a.file), a.verbose))
         sys.exit(0 if ok else 1)

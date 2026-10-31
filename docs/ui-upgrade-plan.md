@@ -936,3 +936,25 @@ Breathe screen after the owner's reference (same c14 build):
   by the firmware in the emulator and placed in the stock bezel (`ui_dials_art.py --previews APP PACK`,
   screen 27,30-213,250). Regenerate them whenever a built-in face changes.
 
+Face switching (pending, app v1342 `c15_faces` + UI pack rev 18; not flashed):
+- Root cause of faces repeating / coming at the wrong time while swiping in the picker (stock bug):
+  with an uploaded face present (`0x20C154 + 0xA3C`), `0x85E29C` replaces *both* of preview 2's
+  neighbours with the uploaded face's preview (left == P1 -> Online, right == P3 -> Online), and
+  WatchOnlinePreview's own neighbours are P1 (left) / P3 (right). Swiping right went
+  1 2 Online 3, swiping left 1 3 2 Online, so back-and-forth swipes jumped between faces.
+  Fix (4 literal loads swapped): left == P3 and right == P1 are replaced instead, Online's left / right
+  are P3 / P1: ring 1 <-> 2 <-> 3 <-> uploaded <-> 1, the same both ways; without an uploaded face it
+  stays 1 <-> 2 <-> 3. Applying, long-press (built-in and uploaded faces: full-screen touch area ->
+  `0x85E264`, picks the preview by `settings+0x11C`, 100 = uploaded) and saving (face byte in the
+  screen-off preference check) were checked and are fine.
+- Uploaded faces' picker preview is their own type-10 element (WatchOnlinePreview draws it at its
+  x / y / w / h). `s100_dial.py` made it a 240 x 240 squeezed thumbnail at the top: no bezel, bottom
+  40 px empty. Now 240 x 280 framed exactly like the built-in previews (`ui_dials_art.framed_preview`,
+  stock bezel + glow; the inner area cleared to the bezel first); `s100_dial.py reframe FILE` updates an
+  existing face file (only the preview changes). All favourites reframed. Built-in previews (pack rev 18)
+  get the same cleaned edge.
+- Uploaded face "One Dot" (`tools/dial_onedot.py`, favourites/onedot.bin): refined dot-matrix face.
+- Emulator (`scratchpad fs5.py`): 17/17 (long-press opens the current face's preview incl. the uploaded
+  face, ring order from every preview both ways, zig-zag x12, apply each); v1341 fails 9 of them.
+  `fs2.py` 9/9 face -> face pixel-identical incl. a minute tick; all other suites pass.
+
