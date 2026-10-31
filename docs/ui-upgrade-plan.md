@@ -772,3 +772,162 @@ the row step in the builder, the release snap and the scroller call, but the gri
 (up to 38 px off). All now use 228 / 3 = 76; a scan of the grid code (`0x8653F0–0x865E00`) finds no
 other row step (`0x865C5C` is the tap zone 0..276 and stays). The momentum animation could not be driven
 faithfully in the emulator; grid layout / taps (24/24), preferences (18/18) and c8/c9 suites pass.
+
+### 12.18 Release c14: navigation screen (built, NOT flashed — part of a batch, flash at the end)
+
+App **v1341** (`c14_nav`) + UI pack **rev 16** (`ui_v16.bin`; arrow art re-encoded, so image addresses
+after `e_nav*` move: flash pack + app together). Android **0.6** (`dist/S100-Companion-0.6.apk`).
+Owner's photo: long street wrapped into the ETA line, no distance, a notched left-turn arrow.
+
+| Problem | Root cause | Fix |
+|---|---|---|
+| Street overlaps the ETA line | each line was one `add_text`; a string wider than its box wraps by itself into the next line, nothing measured it | text measured with the stock font-0 width table (`0x88E38C`); street fitted on up to 2 lines (break at space, `/`, `-`, `,`), else cut with "…"; speed / ETA on one line |
+| No distance shown | Maps puts U+00A0 between number and unit: the Android regex (`\s` excludes it) found no distance; the watch's `ascii()` would also have turned it into `?` | Android normalises no-break / thin spaces and dashes before parsing; firmware maps U+00A0/U+2000–200B/U+202F → space, dashes → `-`, quotes, `·`/`…` → `.` |
+| Street cut ("Kolappura") | street field 39 chars | 47 (`nav_street[48]`); senders budget the street so a frame stays ≤ 80 chars (the stock C5 handler keeps 160 bytes) |
+| "2 . 5" | `.` drawn in a full 56 px digit cell | 24 px cell on this screen; "10.5 km" now fits with its unit beside it (unit below + one street line if it does not) |
+| Arrows missing / notched | 8 arrows; turn = arc + strokes with a seam | 16 arrows in one style (`NAV_DIRS` "SLRlrUAO<>kKMeEu"): + sharp L/R, keep (fork) L/R, merge, exit L/R, U-turn to the right; turns redrawn as one stroke; arrows quantised to 6 colours (pack space) |
+
+Android `NavMirror.direction()` maps the new phrases (specific first: "sharp left" before "left"); U-turns
+use `u` in left-hand-traffic countries (network country / locale). `tools/s100.py nav` has the new names.
+Emulator (`scratchpad c14nav.py`): 66/66 — 7 frames (owner's case, U+00A0 + en dash, short, 10.5 km,
+1500 ft + unbreakable name, a word as distance, empty): every text fits its box (no self-wrap), no
+`?`, nothing off screen, no overlapping rows; all 16 letters show their arrow. Grid 24/24, preferences
+18/18, c8/c9 suites unchanged on c14.
+
+Later in c14 (same files, still not flashed):
+- **Clock** on the navigation screen, re-laid out for 240 × 280: clock 8–32, arrow 34–130, distance in
+  new bold 32 × 44 digits (`s_navd*`, 28 px step, 14 px '.') with the unit beside it 132–176, street on up
+  to two lines from 180, speed / ETA after it (≤ 258); the block moves up without a distance. The 84 px
+  dock digits left no room for the clock. Clock refreshes on the minute (`nav_event`).
+- **Turn alerts:** `t_nav_alert` after each frame: distance in metres (km / m / mi / ft / yd), alert
+  range = speed × 12 s (60–500 m; 150 m without a speed); two 60 ms pulses (`NAV_PULSES`) through the
+  stock motor path (DND / battery rules); once per manoeuvre (FNV hash of direction + street), again
+  after a re-route (distance > 2 × range); not for straight; skipped while the motor runs. Setting
+  `S_WAKE` bit 6 (1 = off), `CFG|na=0/1`, report byte 11 (12-byte report), watch settings page 2
+  "Wake & alerts" (4 rows), Windows / Android toggles (shown only when the watch reports it).
+- Pack space: the 11 charging-ring frames (116 KB) quantised to 8 colours; rev 16 has ~10 KB free.
+
+Emulator (`scratchpad c14b.py`): 78/78 — the 7 frames with the clock (fits, no `?`, on screen with a
+bottom margin, no overlapping rows), 16 arrows, clock refresh, alert sequences (50 / 100 km/h, no
+speed, straight, new manoeuvre, re-route, mi / ft / yd, off, no number, motor busy), CFG, page 2 row.
+Grid 24/24, preferences 18/18, c8/c9 38/38 (expectations updated for the 4-row page and 12-byte report).
+
+AOD brightness / AOD disappearing / touch to wake not kept (owner's next report; same c14 build):
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| AOD "Min" = maximum brightness | `backlight_apply` sends **1 + n** falling edges (one before its loop, `0x83C3A0`), the 16-step driver wraps after the 16th: n = 15 (our Min, `S_BRIGHT` 5) is the brightest; stock never goes past n = 13 so its clamp (n ≥ 15 → 15) was never hit | AOD levels n = 14/13/12/11 (`S_BRIGHT` 20/28/36/44); stock clamp capped at 14 (`0x83C36C/70`); `S_BRIGHT` < 16 → 50 (`0x83C2D6`) |
+| AOD gone after a while; touch to wake / AOD level / dock style / vibration / turn alerts lost | our bytes `+0x2BC–0x2BF` were inside the stock **hourly array 0x290–0x2BF**: cleared at the date change (`memclr` at `0x8304C6`) and written as data at 22:00 / 23:00 | settings moved to our own record `t_p` (RAM `ST->p`, flash `0x97A2D0`, just after the stock block in the same erased sector); `save_settings` replaced (`0x830654` → `t_save_settings`: erase, stock block, record, 50 ms) so every save writes it; loaded on first use (before any erase), old bytes taken over when valid, else defaults; nothing written at boot |
+| AOD on the charger gone when charging completes / on unplug | the charger poll (`0x830F38`) calls `screen_off` directly (`0x830FA8`) when the state drops to "not charging" | → `t_charger_off` (AOD when enabled, stays when shown; off below 10 % or AOD off) |
+| (risk) | AOD / navigation re-armed the screen-off timer with 0x7FFFFFFF ms (ms → ticks can overflow) | the timer is stopped instead |
+
+Emulator (`scratchpad c14prefs.py`, fake SPI flash): 25/25 — app sets six settings, save writes block +
+record, reboot with RAM garbage restores all six, midnight clear and hourly writes of 0x290–0x2BF leave
+them, a stock save first after boot keeps the record, migration (valid old bytes taken over, invalid →
+defaults), AOD levels n = 14/13/12/11, normal 25/50/75/100 % unchanged (13/10/7/3), stored 10 % → 50 %,
+AOD timeout stops the timer, unplug / charge complete keeps or enters AOD (off when AOD off or < 10 %),
+touch to wake works after reboot. Navigation 78/78, preferences 18/18, c8/c9 38/38, grid 24/24.
+
+Charging screen (owner's reference: big ring, bolt, "78%", "Charging..." / "Charged"; same c14 build):
+- **Dock style "Charging"** rebuilt (`t_charge_body`): 196 px ring centred on the screen (22, 44), bolt,
+  percentage in the bold 32 × 44 digits with a small `%`, "Charging..." / "Charged" (≥ 100 %) inside it,
+  small grey clock above. Full ring only at 100 %. Before: 84 px digits crowded a 176 px ring, `%`
+  dropped below them. Ring art (`j_ring*`) redrawn at 196 px, 14 px stroke, one fixed 5-colour palette
+  (`RING_PAL`): consistent colours across the 11 frames and 34 KB smaller than the 176 px set.
+- **Stock charging screen** (`BatteryChargingScreenUI`, also the powered-off charge state, where no
+  code of ours runs): positions only — clock 209 → 16 (top), ring 46 → 81 (centred), digits / `%` with it.
+- **"Nothing"** on the charger now keeps the current screen (what the apps say); it opened the stock
+  charging screen.
+- TAIL region 8 → 12 KB (used 7.8 KB). App image 570,716 B (stock 562,896; r1334's +2.5 KB was accepted;
+  the DFU size limit is still unknown — a refused image is harmless).
+
+Emulator (`scratchpad c14chg.py`): 38/38 — 5 / 45 / 78 / 99 / 100 %: texts fit, label and clock, ring
+position, digit count, bolt / digits / label inside the ring, nothing off screen; stock screen positions;
+"Nothing" keeps the screen, "Charging" opens the face. All earlier suites pass on this build.
+
+Built-in faces after the owner's favourites (same c14 build; owner chose Dashboard, Grid, Duo 2):
+- Favourites are 300-600 KB custom dials; the watch has one 1 MB online-dial slot written over BLE and
+  the UI pack ~18 KB free, so they cannot become built-ins as files. The three stock faces are restyled
+  instead, **with their stock builders** (the face is the first screen after boot: no new code there):
+  art in place (backgrounds must fit their slot), appended frames, frame tables / sizes / positions.
+- **Slot 3 → Grid** (`WatchScreenD2640001`, builder `0x846612`, time + date): dark dot-ring disc
+  (IMG343), new 36 × 52 mono digits (`u_dial3_d03..13`; table `DIAL3_TAB` = 14 time + the stock 14 date
+  frames, the builder reaches the date at +0x38; literals `0x8469D8/DC/E0`), time centred in the disc,
+  date below. No hands / weather / battery (the stock face has no such data): not faked.
+- **Slot 1 → Dashboard** (`WatchScreenD2687001`, builder `0x84792E`): card background (IMG371, 21.4 KB
+  slot), white dot time = the always-on 40 × 60 digits (the stock time table at `0x88A784` is rewritten
+  in place: the builder reaches the weekday −0x1C, ring −0x74 / −0xA0 / −0x48 and heart-rate +0x38 tables
+  from its address, so it cannot move), weekday words (IMG440–446 redrawn, Sunday first like the stock frames: IMG440 = SUN), heart-rate card, live
+  activity-rings tile, steps / kcal card (shared y). Tool: `tools/ui_dials_art.py`.
+- **Slot 2 (Duo 2)**: mapped (trace of builder calls: time 37 × 44 at 39/130,115; date 12 × 14; weekday;
+  temperature; four corner gauges whose values are single digits along arcs). Pending the owner's choice:
+  a light Duo 2 can show time / weekday / date / temperature only (gauges hidden; white frames on dark
+  capsules), else slot 2 stays stock.
+  Slot 3 now uses the bold 32 × 44 navigation digits (`s_navd*`) + its own ':' frame (pack space for
+  the SpO2 art); time at 52 / 124, y 100; date y 154.
+
+SpO2 screen after the owner's reference (same c14 build; reworked after the owner compared the first
+version with the reference: card too small and flat, straight dot columns, condensed blocky digits, no
+subscript, no state row when idle):
+- `BloodOxygenScreenUI` build wrapped (`t_spo2_build`; descriptor init `0x895DD0` +0x1C, capacity 18 -> 32):
+  the stock build still runs (sensor state, measure touch area 0,180 240x100, timer), then its widgets
+  are replaced. Type: Century Gothic Bold (geometric, closest system face to the reference).
+  - header `v_spo2_a_head` (96 x 28 at 14,22): thin chevron + "SpO2" with a real subscript; clock
+    right-aligned to x 226 in the status-bar digits (`QS_DIG`, one widget; a Century Gothic clock set
+    did not fit the pack).
+  - card `v_spo2_a_card` (212 x 128 at 14,60): vertical gradient (row-constant, free in the row RLE),
+    O2 icon, letter-spaced BLOOD OXYGEN, halftone crescent (6 concentric arcs bulging right, dots
+    growing outwards and shrinking at the arc ends).
+  - reading: 62 px proportional digits `v_spo2_b_d*` (widths `SPO2_DW`), smaller '%', "--" until a
+    result; black-keyed (transparent background), baseline y 154, so they sit on gradient and dots.
+    Glyph frames end 2 px below the baseline (round digits overshoot it). The '%' is drawn (two solid
+    rings + slash, 25 x 26): the font's own was clipped by its frame and has a joining stroke.
+  - status row (ring 32 x 32 at 20,206; line 160 x 18 at 64,204; 12 pills 6 x 12 at 64 + 13k, 228):
+    measuring (stock build chose a ring frame `0x88B1C4`) = grey track + 90-degree orange arc
+    (2 of 8 octant pieces `v_spo2_d_oct*`, one 45-degree step per 500 ms tick `0x20C154 + 0xD60`),
+    "Measuring...", pills = real progress of the stock 60 s window (ticks `U8(0x2142ED)` x period
+    `0x20C154 + 0xD64` / 60 s); idle = track + orange dot, "Tap to measure", no pills; reading shown =
+    full orange ring (8 octants), "Tap to measure again", all pills.
+  Reading = `U8(0x20D154 + 0xFE)` (the stock enter clears it, so a new screen shows "--" until measured).
+- Emulator (`scratchpad c14spo2.py`): 54/54 — no reading, measuring at 20 s / 50 s, 98 %, 100 %, 7 %:
+  header + card, one right-aligned clock widget, value frames, shared baseline / no overlap, black-keyed,
+  arc octants follow the counter, pills = progress, done / idle rows, on screen, <= 32 widgets, stock
+  touch area kept. All other suites pass. Image 571,820 B; pack 692 B free.
+
+Breathe screen after the owner's reference (same c14 build):
+- `BreathTrainingScreenUI` build wrapped (`t_breath_build`; descriptor init `0x895E0C` +0x1C). The stock
+  build still runs (state, touch areas, vibration at each exhale); its widgets are replaced except on the
+  duration / pace pickers (`0x2142F0` / `0x2142F1` set) and the summary (`0x20D242`), which stay stock.
+  Stock state (`0x20D154`): +0x0D running, +0x10 lead-in step (0-4, then 5), +0x14 total s (5 + 60 x min);
+  `0x20D970` 1 = inhale / 0 = exhale, `0x20D971` pace 1 Slow / 2 Calm / 3 Fast, `0x20D972` minutes (1-4).
+  Breath count `0x20C154 + 0xD60`, advanced by the timer-2 event (`0x84B700`); end = timer 1 (screen off).
+- Setup: "Breathe" (solid, the SpO2 header face) + chevron + clock, orange stadium with the halftone mark, dark dot panel,
+  Duration / Pace cards (value from the stock settings), START. Stock touch areas moved onto the cards
+  and the button (found by handler: `0x84ABC5` start, `0x84AC45` duration, `0x84ACB7` pace).
+- Breathing: the breath timer runs at twice the rate with twice the count (patches in the event handler
+  and in enter: 1000/800/500 ms -> 500/400/250, toggle at 21), so a phase is as long as stock (11 /
+  8.8 / 5.5 s) but has 22 steps: ticks 0-17 inhale or exhale (20 disc sizes, eased), 18-21 hold. The
+  disc grows inside a track ring; label Inhale / Hold / Exhale; time left under it from the clock
+  (seconds `0x20BF1C`, ticked by the 1 s RTC handler `0x8305E0`). Lead-in: "Get ready" + 5 step dots.
+  Time left 0 while stock waits for its end timer: "Well done", 0:00.
+- Art (`tools/ui_breathe_art.py`) is all in place (pack unchanged, 692 B free): Breathe's own slots
+  (title 598, chevron in the unused '/' digit 605, digits 606-615, min 600, pace words 599/601/602,
+  labels 624/638/639, dots 625/626, frames 627-637) and the SpO2 slots the reworked SpO2 screen no
+  longer draws (1536 START, 1539/1540 cards, 1555 Hold, 621 Well done, 1565/1566 panels, 1556-1564
+  frames; 1556-1566 are still compared by address for "measuring", their content is free). Frames go
+  to slots by cost (`frame_slots`). Run after ui_cmf / ui_cmf_text / ui_apps_art (it overwrites slots).
+  Not reused: IMG617 (also used by another screen at `0x84EC18`), 618-620 and 622-623 (pickers).
+- Emulator (`scratchpad c14breath.py`): 30/30: setup widgets, pace / minutes values, touch areas on the
+  cards / button, tap -> stock picker, START -> lead-in (dots), tick periods per pace, a full cycle
+  (22 + 22 ticks: inhale 0 -> 19 rising, hold at 19, exhale falling, hold at 0; labels), time left from
+  the clock (2:00 .. 0:00), finish, setup after the end. Emulator gap: the stock text layout `0x8427C2`
+  reads a language table the emulator does not map (stock v1340 fails the same; stubbed in that case).
+  All other suites pass. Image 573,164 B.
+- Pre-flash audit (2026-10-31): pack decoded image by image against the generators (63 in-place
+  images identical), every screen (68) on v1340 vs this build (no new emulator stops, no lost or
+  off-screen widgets; only charging, SpO2, Breathe and faces 1 / 3 differ), weekday 7/7 over a week,
+  Breathe resume periods 3/3. Found and fixed: Dashboard weekday one day late (frames were Monday-first),
+  breath track ring tinted by the slot fitter's fallback palette in some frames (frames now use a fixed
+  palette and a crisp 1 px ring), white digits / START / chevron given explicit palettes for the same
+  reason. Every in-place image now fits its slot without the fitter's reduction.
+

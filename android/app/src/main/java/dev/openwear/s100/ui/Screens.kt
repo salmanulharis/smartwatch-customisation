@@ -288,6 +288,9 @@ fun SettingsScreen(act: MainActivity) {
                     ToggleRow("Press to wake", "Side button wakes the screen", w.pressWake) { set("bw", it) }
                     ToggleRow("12-hour time", "", w.twelveHour) { set("h12", it) }
                     ToggleRow("Tap vibration", "Short tick on every tap", w.tapVibration) { set("vib", it) }
+                    w.turnAlerts?.let { on ->
+                        ToggleRow("Navigation turn alerts", "Two short pulses before each turn (Maps navigation)", on) { set("na", it) }
+                    }
                     Text("At least one wake option always stays on.", color = C.Dim, fontSize = 12.sp)
                 }
                 if (msg.isNotEmpty()) Text(msg, color = C.Dim, fontSize = 13.sp)

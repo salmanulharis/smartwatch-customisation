@@ -100,12 +100,10 @@ def straight(c):
     arrow_head(c, 24, 10, -90, col=NAV)
 
 
-def turn(sign):
+def turn(sign):                           # one stroke with a rounded corner (no seam at the bend)
     def f(c):
-        c.stroke([(24, 42), (24, 26)], 6, NAV)
-        c.arc(24 + sign * 8, 26, 8, 180 if sign > 0 else -90, 270 if sign > 0 else 0, 6, NAV)
-        c.stroke([(24 + sign * 8, 18), (24 + sign * 14, 18)], 6, NAV)
-        arrow_head(c, 24 + sign * 16, 18, 0 if sign > 0 else 180, col=NAV)
+        c.stroke([(24 - sign * 6, 42), (24 - sign * 6, 20), (24 + sign * 10, 20)], 6, NAV)
+        arrow_head(c, 24 + sign * 12, 20, 0 if sign > 0 else 180, col=NAV)
     return f
 
 
@@ -158,24 +156,38 @@ def digit(ch: str, colour, style: str):
 
 
 # ---- charging face: 11 ring frames (battery 0..100 % in 10 % steps)
-RING = 176
+RING = 196
 
 
 def ring(level: int):
+    """Charging ring (rev 16): 196 px, 14 px stroke, green arc from the top over a dark track, round
+    caps; 5 colours, which encodes smaller than the 176 px / 8-colour set it replaces."""
     def make():
         big = Image.new("RGB", (RING * SS, RING * SS))
         d = ImageDraw.Draw(big)
-        w = 13 * SS
+        w = 14 * SS
         box = (w // 2, w // 2, RING * SS - w // 2, RING * SS - w // 2)
-        d.arc(box, 0, 360, fill=GREEN_DIM, width=w)
+        d.arc(box, 0, 360, fill=(20, 62, 36), width=w)
         if level:
             d.arc(box, -90, -90 + 36 * level, fill=GREEN, width=w)
             for a in (-90, -90 + 36 * level):           # round caps
                 r = (RING * SS - w) / 2
                 cx = RING * SS / 2 + r * math.cos(math.radians(a)); cy = RING * SS / 2 + r * math.sin(math.radians(a))
                 d.ellipse((cx - w / 2, cy - w / 2, cx + w / 2, cy + w / 2), fill=GREEN)
-        return big.resize((RING, RING), Image.LANCZOS)
+        return big.resize((RING, RING), Image.LANCZOS).quantize(palette=RING_PAL, dither=Image.Dither.NONE).convert("RGB")
     return make
+
+
+def _ring_palette():                      # one fixed palette for every frame (consistent colours)
+    track = (20, 62, 36)
+    cols = [(0, 0, 0), track, GREEN, tuple((a + b) // 2 for a, b in zip((0, 0, 0), track)),
+            tuple((a + b) // 2 for a, b in zip(track, GREEN))]
+    pal = Image.new("P", (1, 1))
+    pal.putpalette([v for c in cols for v in c] + [0] * (768 - 3 * len(cols)))
+    return pal
+
+
+RING_PAL = _ring_palette()
 
 
 def small(fn, size):
@@ -220,12 +232,19 @@ def battery(c):
     c.rect(10, 19, 34, 29, 1.5, WHITE)
 
 
-def bare(fn, size=96):
+def bare(fn, size=96, colours=None):
     def make():
         c = Bare(size)
         fn(c)
-        return c.image()
+        im = c.image()
+        if colours:                       # few colours: much shorter RLE (the pack is near its limit)
+            im = im.quantize(colours, dither=Image.Dither.NONE).convert("RGB")
+        return im
     return make
+
+
+def nav_arrow(fn):                        # navigation arrows: 6 colours look the same at 96 px
+    return bare(fn, colours=6)
 
 
 # name -> generator; sorted names = append order
@@ -233,9 +252,9 @@ ART = {
     "a_tile_aod_off": tile(aod), "a_tile_aod_on": tile(aod, on=True),
     "b_tile_find": tile(find_phone), "c_tile_watchset": tile(watch_settings), "d_tile_clock": tile(desk_clock),
     # file names must differ case-insensitively (Windows); order fixes the firmware's arrow index
-    "e_nav0_straight": bare(straight), "e_nav1_left": bare(turn(-1)), "e_nav2_right": bare(turn(1)),
-    "e_nav3_slight_left": bare(slight(-1)), "e_nav4_slight_right": bare(slight(1)), "e_nav5_uturn": bare(uturn),
-    "e_nav6_arrive": bare(arrive), "e_nav7_roundabout": bare(roundabout),
+    "e_nav0_straight": nav_arrow(straight), "e_nav1_left": nav_arrow(turn(-1)), "e_nav2_right": nav_arrow(turn(1)),
+    "e_nav3_slight_left": nav_arrow(slight(-1)), "e_nav4_slight_right": nav_arrow(slight(1)), "e_nav5_uturn": nav_arrow(uturn),
+    "e_nav6_arrive": nav_arrow(arrive), "e_nav7_roundabout": nav_arrow(roundabout),
 }
 # dock (bold white hours / bold orange minutes) and AOD (light) digit sets; names keep the order
 for k, ch in enumerate(GLYPHS):
@@ -256,6 +275,63 @@ from ui_apps_art import ART as APPS_ART  # app list / grid after the owner's ref
 ART.update(APPS_ART)
 
 
+# ---- more navigation arrows (rev 16, appended after everything else: "r_nav*"). Same 48-unit
+# grid, stroke and heads as the first eight; the road not taken is drawn dim.
+NAV_DIM = (52, 62, 80)
+
+
+def sharp(sign):                          # sign -1 = left
+    def f(c):
+        sx = 24 - sign * 6
+        end = (24 + sign * 10, 32)
+        c.stroke([(sx, 42), (sx, 14)], 6, NAV)
+        c.stroke([(sx, 14), end], 6, NAV)
+        ang = math.degrees(math.atan2(end[1] - 14, end[0] - sx))
+        a = math.radians(ang)
+        arrow_head(c, end[0] + 2 * math.cos(a), end[1] + 2 * math.sin(a), ang, col=NAV)
+    return f
+
+
+def keep(sign):                           # fork: take the `sign` branch
+    def f(c):
+        c.stroke([(24, 28), (24 - sign * 10, 13)], 6, NAV_DIM)
+        c.stroke([(24, 42), (24, 28), (24 + sign * 10, 13)], 6, NAV)
+        ang = -90 + sign * 34
+        a = math.radians(ang)
+        arrow_head(c, 24 + sign * 10 + 2 * math.cos(a), 13 + 2 * math.sin(a), ang, col=NAV)
+    return f
+
+
+def merge(c):
+    c.stroke([(34, 42), (34, 10)], 6, NAV_DIM)
+    c.stroke([(14, 42), (14, 31), (25, 20), (25, 12)], 6, NAV)
+    arrow_head(c, 25, 10, -90, col=NAV)
+
+
+def uturn_right(c):                       # left-hand traffic (India, UK, ...): U-turn to the right
+    c.stroke([(18, 42), (18, 22)], 6, NAV)
+    c.arc(25, 22, 7, 180, 360, 6, NAV)
+    c.stroke([(32, 22), (32, 30)], 6, NAV)
+    arrow_head(c, 32, 33, 90, col=NAV)
+
+
+def ramp(sign):                           # exit / slip road on the `sign` side
+    def f(c):
+        c.stroke([(24 - sign * 4, 42), (24 - sign * 4, 9)], 6, NAV_DIM)
+        c.stroke([(24 - sign * 4, 42), (24 - sign * 4, 30), (24 + sign * 10, 15)], 6, NAV)
+        ang = -90 + sign * 43
+        a = math.radians(ang)
+        arrow_head(c, 24 + sign * 10 + 2 * math.cos(a), 15 + 2 * math.sin(a), ang, col=NAV)
+    return f
+
+
+# firmware arrow index 8.. (ext.c NAV_DIRS): < > k K M e E u
+ART.update({"r_nav08_sharp_left": nav_arrow(sharp(-1)), "r_nav09_sharp_right": nav_arrow(sharp(1)),
+            "r_nav10_keep_left": nav_arrow(keep(-1)), "r_nav11_keep_right": nav_arrow(keep(1)),
+            "r_nav12_merge": nav_arrow(merge), "r_nav13_exit_left": nav_arrow(ramp(-1)), "r_nav14_exit_right": nav_arrow(ramp(1)),
+            "r_nav15_uturn_right": nav_arrow(uturn_right)})
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-o", "--out", type=Path, default=ROOT / "research" / "ui" / "feature_append")
@@ -266,6 +342,32 @@ def main() -> None:
     for name, fn in ART.items():
         fn().save(a.out / f"{name}.png")
     print(f"{len(ART)} images -> {a.out}")
+
+
+
+# ---- navigation distance digits (rev 16, "s_navd*"): bold, 32 x 44 (the 84 px dock digits left no
+# room for the time on the navigation screen); 6 colours for a short encoding
+NAVD_W, NAVD_H = 32, 44
+
+
+def nav_digit(ch):
+    def make():
+        big = Image.new("RGB", (NAVD_W * SS, NAVD_H * SS))
+        d = ImageDraw.Draw(big)
+        f = ImageFont.truetype(FONT, int(NAVD_H * SS * 1.18))
+        f.set_variation_by_name("Bold")
+        x0, y0, x1, y1 = d.textbbox((0, 0), "0", font=f)
+        bx0, _, bx1, _ = d.textbbox((0, 0), ch, font=f)
+        d.text(((NAVD_W * SS - (bx1 - bx0)) / 2 - bx0, (NAVD_H * SS - (y1 - y0)) / 2 - y0), ch, font=f, fill=WHITE)
+        im = big.resize((NAVD_W, NAVD_H), Image.LANCZOS)
+        return im.quantize(6, dither=Image.Dither.NONE).convert("RGB")
+    return make
+
+
+ART.update({f"s_navd{k:02d}": nav_digit(ch) for k, ch in enumerate(GLYPHS)})
+
+from ui_dials_art import ART as DIALS_ART  # built-in faces after the favourites (rev 16, "u_dial*")
+ART.update(DIALS_ART)
 
 
 if __name__ == "__main__":

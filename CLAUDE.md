@@ -54,6 +54,7 @@ tools/                 # standalone helper scripts (not part of the package; dia
   s100_screens.py      # offline previewer: runs real screen build/touch code in Unicorn (render/all/nav)
   s100_preview.py      # interactive emulator session for a built app + UI pack (s100_app "Firmware preview" tab)
   ui_apps_art.py       # app list / grid art (p_*) + SpO2 in-place art
+  ui_breathe_art.py    # Breathe screen art, in place (Breathe + unused SpO2 slots)
   ui_dots.py           # dot-matrix digit frames (appended to the pack) + app pointer patches
   ui_pickers.py        # CMF picker/roller strips (raw tail, in place)
   ui_cmf.py, ui_cmf_text.py, ui_labels.json  # CMF-style restyle of the UI pack

@@ -175,6 +175,7 @@ if FEATURE_PACK_V13.with_suffix(".append.json").exists():
     MODS["c7_wake"] = (1334, _c7, "c6 + usable while charging, wake options, AOD on timeout incl. charger, "
                        "settings sync (CFG/0x7E); app image grows (tail code) (pairs with ui_v13)")
 FEATURE_PACK_V15 = ROOT / "research" / "ui" / "build" / "ui_v15.bin"
+FEATURE_PACK_V16 = ROOT / "research" / "ui" / "build" / "ui_v16.bin"
 if FEATURE_PACK_V15.with_suffix(".append.json").exists():
     # back to the stock 4 x 70 px app list (the reference's row density): drop c1's 93 px row patches
     _LIST93 = {0x00851E7C, 0x00851F10, 0x00851EAA, 0x008524A6, 0x008524CA, 0x00852532}
@@ -199,6 +200,14 @@ if FEATURE_PACK_V14.with_suffix(".append.json").exists():
     MODS["c8_aod"] = (1335, _c8, "c7 + text cut-off fix (box 56), AOD after the reference with its own "
                       "backlight level, wrist-down -> AOD, quick panel from every side page, two-page "
                       "watch settings (pairs with ui_v14)")
+
+if FEATURE_PACK_V16.with_suffix(".append.json").exists():
+    def _c14():
+        from s100_ext import build as _ext_build
+        return [p for p in MODS["c1_layout"][1] if p[0] not in _LIST93] + _ext_build(FEATURE_PACK_V16)
+    MODS["c14_nav"] = (1341, _c14, "c13 + navigation: text fitted (two street lines, ellipsis), unit beside "
+                       "the distance, 16 arrows (sharp / keep / merge / exit / U-turn right) (pairs with ui_v16)")
+
 
 def grow_image(data: bytearray) -> None:
     """Fix the size fields of an app image that grew past the stock end (same layout as the UI pack:

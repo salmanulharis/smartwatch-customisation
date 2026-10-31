@@ -40,7 +40,8 @@ object Hub {
      *  The watch is the source of truth: the app never pushes these on connect. */
     data class WatchSettings(val aod: Boolean, val tapWake: Boolean, val raiseWake: Boolean, val pressWake: Boolean,
                              val dock: Int, val twelveHour: Boolean, val tapVibration: Boolean, val battery: Int,
-                             val aodLevel: Int? = null)   // always-on backlight 0 (dimmest) - 3; firmware r1335+
+                             val aodLevel: Int? = null,   // always-on backlight 0 (dimmest) - 3; firmware r1335+
+                             val turnAlerts: Boolean? = null) // navigation turn alerts; firmware r1341+
     val watchSettings = MutableStateFlow<WatchSettings?>(null)
     private var loop: Job? = null
     private val notifyLock = Mutex()
@@ -129,7 +130,7 @@ object Hub {
     /** Charging screen style on the watch (0 dock, 1 always-on look, 2 charging ring, 3 off). */
     suspend fun setDock(style: Int): Boolean = notify("CFG|dock=$style", Protocol.TYPE_OTHER)
 
-    /** One watch setting: aod, tw (tap to wake), rw (raise), bw (press), h12, vib. The watch replies
+    /** One watch setting: aod, tw (tap to wake), rw (raise), bw (press), h12, vib, na (turn alerts). The watch replies
      *  with its full settings report, which updates [watchSettings]. */
     suspend fun setWatch(key: String, on: Boolean): Boolean = notify("CFG|$key=${if (on) 1 else 0}", Protocol.TYPE_OTHER)
 

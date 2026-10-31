@@ -248,6 +248,23 @@ details summary { cursor: pointer; color: var(--dim); font-size: 12.5px; margin-
             <button class="btn pv" data-sw="left">Swipe ←</button><button class="btn pv" data-sw="right">Swipe →</button>
           </div>
           <div class="row"><select id="pvGo" class="grow"></select><button class="btn pv" id="pvGoBtn">Open screen</button></div>
+          <p class="hint">Phone message to the emulated watch (navigation frames, settings, charger screens):</p>
+          <div class="row">
+            <select id="pvPreset" class="grow">
+              <option value="NAV|L||Calicut Airport Rd/Kondotty - Kolappuram||Arrive 21:33">Navigation: long street, no distance</option>
+              <option value="NAV|l|2.5 km|Calicut Airport Rd/Kondotty - Kolappuram|48 km/h|Arrive 21:33">Navigation: 2.5 km, slight left</option>
+              <option value="NAV|R|200 m|MG Road|48 km/h|14:45">Navigation: 200 m right</option>
+              <option value="NAV|O|150 m|Roundabout|30 km/h|Arrive 21:40">Navigation: roundabout (turn alert)</option>
+              <option value="NAV|u|80 m|NH 66|40 km/h|">Navigation: U-turn (right)</option>
+              <option value="CFG|show=2">Show the charging screen</option>
+              <option value="CFG|show=0">Show the dock</option>
+              <option value="CFG|show=1">Show always-on now</option>
+              <option value="CFG|aod=1|ab=0">AOD on, brightness Min</option>
+              <option value="CFG|tw=1">Touch to wake on</option>
+              <option value="CFG|get">Read settings (report)</option>
+            </select>
+          </div>
+          <div class="row"><input type="text" id="pvMsg" class="grow" maxlength="80" placeholder="NAV|dir|dist|street|speed|eta  or  CFG|..."><button class="btn pv" id="pvMsgBtn">Send</button></div>
         </div>
         <div class="panel">
           <h3>Simulated watch state</h3>
@@ -373,11 +390,12 @@ $("#hourSeg").onclick = e => { const b = e.target.closest("button"); if (!b || b
 $("#mediaKeys").onchange = e => act(null, () => api("/api/media_keys", { on: e.target.checked }));
 const WATCH_ROWS = [["aod", "Always-on display", "Dims to a minimal screen instead of turning off"],
   ["tw", "Tap to wake", "Uses a little more battery"], ["rw", "Raise to wake", ""], ["bw", "Press to wake", "Side button"],
-  ["h12", "12-hour time", ""], ["vib", "Tap vibration", ""]];
+  ["h12", "12-hour time", ""], ["vib", "Tap vibration", ""],
+  ["na", "Navigation turn alerts", "Two short pulses before each turn"]];
 function renderWatchSettings() {
   const w = state.watch, box = $("#watchSettings");
   if (!w) { box.innerHTML = '<p class="hint">Connect to read the watch\'s settings.</p>'; return; }
-  box.innerHTML = WATCH_ROWS.map(([k, label, hint]) =>
+  box.innerHTML = WATCH_ROWS.filter(([k]) => k in w).map(([k, label, hint]) =>
     `<label class="wrow"><span>${label}${hint ? `<small>${hint}</small>` : ""}</span>` +
     `<input type="checkbox" data-k="${k}" ${w[k] ? "checked" : ""} ${state.busy ? "disabled" : ""}></label>`).join("") +
     '<p class="hint">At least one wake option always stays on.</p>';
@@ -431,6 +449,8 @@ $("#pvStart").onclick = () => act($("#pvStart"), async () => {
 document.querySelectorAll("[data-in]").forEach(b => b.onclick = () => pvInput({ kind: b.dataset.in }));
 document.querySelectorAll("[data-sw]").forEach(b => b.onclick = () => pvInput({ kind: "swipe", dir: b.dataset.sw }));
 $("#pvGoBtn").onclick = () => pvInput({ kind: "go", name: $("#pvGo").value });
+$("#pvPreset").onchange = () => { $("#pvMsg").value = $("#pvPreset").value; };
+$("#pvMsgBtn").onclick = () => pvInput({ kind: "message", text: $("#pvMsg").value || $("#pvPreset").value });
 $("#pvApply").onclick = () => pvInput({ kind: "data", data: pvData() });
 { // click = tap, hold = long press, drag = swipe (in watch pixels: the image is shown at 240 x 280)
   let down = null;

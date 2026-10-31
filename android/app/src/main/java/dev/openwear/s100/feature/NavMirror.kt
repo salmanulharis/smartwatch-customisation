@@ -35,9 +35,9 @@ object NavMirror {
         if (!Hub.prefs.navMirror) return
         if (n.flags and Notification.FLAG_ONGOING_EVENT == 0) return       // only the navigation card
         val ex = n.extras
-        val title = ex.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
-        val text = ex.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
-        val sub = ex.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString().orEmpty()
+        val title = clean(ex.getCharSequence(Notification.EXTRA_TITLE))
+        val text = clean(ex.getCharSequence(Notification.EXTRA_TEXT))
+        val sub = clean(ex.getCharSequence(Notification.EXTRA_SUB_TEXT))
         if (title.isBlank() && text.isBlank()) return
         startGps(context)
 
@@ -68,23 +68,52 @@ object NavMirror {
         Hub.scope.launch { Hub.notify(msg, Protocol.TYPE_OTHER) }
     }
 
+    /** Maps puts a no-break space between number and unit ("2.5\u00A0km") and typographic dashes in
+     *  street names; plain ASCII spaces / dashes make the distance parse and survive the watch's
+     *  ASCII-only text. */
+    private fun clean(cs: CharSequence?): String = cs?.toString().orEmpty()
+        .replace(Regex("[\u00A0\u2007\u2009\u202F\u2000-\u200A]"), " ")
+        .replace(Regex("[\u2010-\u2015\u2212]"), "-")
+        .trim()
+
     private val DIST = Regex("""\d+(?:[.,]\d+)?\s?(?:km|m|mi|ft|yd)\b""", RegexOption.IGNORE_CASE)
     private val STREET = Regex("""\b(onto|on|towards|toward|into|to)\s+(.+)$""", RegexOption.IGNORE_CASE)
 
-    /** S straight, L left, R right, l slight left, r slight right, U u-turn, A arrive, O roundabout */
+    /** Direction letters of the watch's arrow set (ext.c NAV_DIRS): S straight, L / R turn,
+     *  l / r slight, U U-turn (right-hand traffic) / u U-turn to the right (left-hand traffic),
+     *  A arrive, O roundabout, < / > sharp, k / K keep (fork), M merge, e / E exit (ramp).
+     *  More specific phrases are checked first ("sharp left" before "left"). */
     fun direction(s: String): Char? {
         val t = s.lowercase()
+        fun side(l: Char, r: Char) = if ("left" in t) l else if ("right" in t) r else null
         return when {
             "roundabout" in t || "rotary" in t -> 'O'
-            "u-turn" in t || "make a u" in t -> 'U'
+            "u-turn" in t || "make a u" in t -> if (leftHandTraffic()) 'u' else 'U'
             "destination" in t || "arrive" in t || "you have arrived" in t -> 'A'
-            "slight left" in t || "keep left" in t || "bear left" in t -> 'l'
-            "slight right" in t || "keep right" in t || "bear right" in t -> 'r'
+            "sharp left" in t -> '<'
+            "sharp right" in t -> '>'
+            ("exit" in t || "ramp" in t || "slip road" in t) && side('e', 'E') != null -> side('e', 'E')
+            "merge" in t -> 'M'
+            "keep left" in t || "fork left" in t || "stay left" in t -> 'k'
+            "keep right" in t || "fork right" in t || "stay right" in t -> 'K'
+            "slight left" in t || "bear left" in t -> 'l'
+            "slight right" in t || "bear right" in t -> 'r'
             "left" in t -> 'L'
             "right" in t -> 'R'
             "straight" in t || "continue" in t || "head " in t -> 'S'
             else -> null
         }
+    }
+
+    /** Countries that drive on the left: U-turns go to the right there (Maps draws them so). */
+    private val LHT = setOf("IN", "GB", "IE", "AU", "NZ", "JP", "ZA", "MY", "SG", "TH", "ID", "PK", "BD", "LK",
+        "NP", "BT", "HK", "MO", "KE", "UG", "TZ", "ZM", "ZW", "BW", "NA", "MZ", "MW", "MU", "CY", "MT", "JM", "TT",
+        "BS", "BB", "GY", "SR", "FJ", "PG", "BN", "TL", "MV", "SC", "LS", "SZ")
+
+    private fun leftHandTraffic(): Boolean {
+        val tm = ctx?.getSystemService(android.telephony.TelephonyManager::class.java)
+        val cc = (tm?.networkCountryIso?.takeIf { it.isNotBlank() } ?: java.util.Locale.getDefault().country).uppercase()
+        return cc in LHT
     }
 
     /** Fallback: where the arrow's ink is in the upper half of Maps' large icon. */

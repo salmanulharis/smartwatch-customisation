@@ -252,14 +252,18 @@ class S100:
 
 
 NAV_DIRS = {"straight": "S", "left": "L", "right": "R", "slight-left": "l", "slight-right": "r",
-            "uturn": "U", "arrive": "A", "roundabout": "O"}
+            "uturn": "U", "uturn-right": "u", "arrive": "A", "roundabout": "O",
+            "sharp-left": "<", "sharp-right": ">", "keep-left": "k", "keep-right": "K", "merge": "M",
+            "exit-left": "e", "exit-right": "E"}
 
 
 def nav_text(direction: str, distance_m: float, street: str, speed: str = "", eta: str = "") -> str:
     """'NAV|dir|dist|street|speed|eta', read by the c2_features navigation screen (ext.c nav_check)."""
     d = NAV_DIRS.get(direction.lower(), direction[:1] or "S")
     dist = f"{distance_m / 1000:.1f} km" if distance_m >= 1000 else f"{int(round(distance_m, -1))} m"
-    return f"NAV|{d}|{dist}|{street[:39]}|{speed[:15]}|{eta[:23]}"
+    speed, eta = speed[:15], eta[:23]
+    room = max(0, min(47, 80 - len(f"NAV|{d}|{dist}|||{speed}|{eta}")))   # the watch keeps 80 chars
+    return f"NAV|{d}|{dist}|{street[:room].rstrip()}|{speed}|{eta}"
 
 
 async def main():

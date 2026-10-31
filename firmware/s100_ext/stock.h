@@ -82,13 +82,11 @@ int weekday_of(int year, int month, int day);  /* @0x0083028E */   /* 0 = Sunday
 #define S_WX_NOW     U8(0x0020BFC2)
 #define S_WX_MIN     U8(0x0020BFC3)
 #define S_WX_MAX     U8(0x0020BFCA)
-#define S_HAPTIC_OFF U8(SETTINGS + 0x2BF)  /* ours: unreferenced byte in the saved struct, 0 = on */
-#define S_DOCK       U8(SETTINGS + 0x2BE)  /* ours: charging screen style 0-3 (see ext.c) */
-#define S_AOD        U8(SETTINGS + 0x2BD)  /* ours: 1 = always-on display instead of screen off */
+/* Our own settings (S_WAKE, S_AOD, S_DOCK, S_HAPTIC_OFF) are NOT in the stock block: its bytes
+ * 0x290-0x2BF are an hourly array the stock firmware writes at 22:00 / 23:00 and clears at midnight
+ * (memclr at 0x8304C6). They live in ext.c's record (t_prefs, flash 0x97A2D0); see ext.c. */
+#define LEGACY_PREFS (SETTINGS + 0x2BC)    /* where releases up to r1340 kept them (migration only) */
 #define S_STEPS      U32(SETTINGS + 0x14)  /* today's steps (HomeStatus builder 0x850BFA) */
-#define S_WAKE       U8(SETTINGS + 0x2BC)  /* ours: bit0 touch to wake ON, bit1 button to wake OFF,
-                                              bits 4-5 always-on backlight level 0 (dimmest) - 3 */
-#define AOD_LEVEL    ((S_WAKE >> 4) & 3)
 #define S_RAISE      U8(SETTINGS + 0x1BA)  /* stock raise to wake (mirrors: +0x32, +0x1A6 bit 1) */
 #define S_RAISE_ALGO U8(SETTINGS + 0x32)
 #define S_1A6        U8(SETTINGS + 0x1A6)
@@ -116,5 +114,12 @@ void tp_deep_sleep(void);  /* @0x0083F288 */   /* touch IC config + deep sleep (
 void raise_reset(void);  /* @0x008716FA */   /* wrist gesture state -> idle */
 void stock_charge_key(int cls, int k);  /* @0x008496A4 */   /* BatteryCharging +0x28 */
 void power_off_prep(void);  /* @0x0083162C */   /* first step of power off 0x831660 */
+void spo2_stock_build(inst_t *in, int arg);  /* @0x0084A9D2 */   /* BloodOxygen build (+0x1C) */
+void breath_stock_build(inst_t *in, int arg);  /* @0x0084B9CA */   /* BreathTraining build (+0x1C) */
+void flash_read(void *dst, uint32_t flash, uint32_t len);  /* @0x0086C0AA */
+void flash_write(const void *src, uint32_t flash, uint32_t len);  /* @0x0086C54C */
+int flash_erase(uint32_t flash, uint32_t cmd);  /* @0x0086C3AE */   /* cmd 0x20 = 4 KB sector */
+void delay_us(uint32_t us);  /* @0x0083B474 */
+#define SETTINGS_FLASH 0x0097A000u    /* save_settings: erase this sector, write the 0x2D0-byte block */
 
 #endif

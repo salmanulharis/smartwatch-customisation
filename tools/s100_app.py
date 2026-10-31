@@ -253,14 +253,14 @@ class WatchLink(S100):
 
 
 # Watch settings report (firmware c7, ext.c t_report): 7E 01 aod tap raise press dock h12 vib battery
-# [aod_level] (the last byte from firmware c8 / r1335: always-on backlight 0 dimmest - 3)
-WATCH_KEYS = {"aod": 2, "tw": 3, "rw": 4, "bw": 5, "h12": 7, "vib": 8}
+# [aod_level] (from firmware c8 / r1335: always-on backlight 0 dimmest - 3) [turn alerts] (c14 / r1341)
+WATCH_KEYS = {"aod": 2, "tw": 3, "rw": 4, "bw": 5, "h12": 7, "vib": 8, "na": 11}
 
 
 def parse_watch_settings(d: bytes) -> dict | None:
     if len(d) < 10 or d[:2] != b"\x7e\x01":
         return None
-    out = {k: bool(d[i]) for k, i in WATCH_KEYS.items()}
+    out = {k: bool(d[i]) for k, i in WATCH_KEYS.items() if i < len(d)}
     out["dock"] = d[6]
     out["battery"] = d[9]
     out["ab"] = d[10] if len(d) > 10 else None
@@ -755,6 +755,8 @@ class Handler(BaseHTTPRequestHandler):
                     pv.timeout()
                 elif kind == "go":
                     pv.go(str(body.get("name", "")))
+                elif kind == "message":
+                    pv.message(str(body.get("text", ""))[:80])
                 elif kind == "data":
                     pv.update(body.get("data") or {})
                 else:

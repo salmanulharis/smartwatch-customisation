@@ -68,9 +68,14 @@ object Protocol {
         return payload.toList().chunked(18).mapIndexed { seq, c -> byteArrayOf(0xC5.toByte(), seq.toByte()) + c.toByteArray() }
     }
 
-    /** Navigation frame for the c2_features navigation screen (firmware/s100_ext/ext.c nav_check). */
-    fun navText(dir: Char, distance: String, street: String, speed: String, eta: String) =
-        "NAV|$dir|${distance.take(11)}|${street.take(39)}|${speed.take(15)}|${eta.take(23)}"
+    /** Navigation frame for the watch's navigation screen (firmware/s100_ext/ext.c nav_check).
+     *  The watch keeps 80 characters of a notification (160 bytes UTF-16), so the street gets what is
+     *  left after the other fields (at most 47, the watch's field size). */
+    fun navText(dir: Char, distance: String, street: String, speed: String, eta: String): String {
+        val d = distance.take(11); val sp = speed.take(15); val e = eta.take(23)
+        val room = (80 - "NAV|$dir|$d|||$sp|$e".length).coerceIn(0, 47)
+        return "NAV|$dir|$d|${street.take(room).trimEnd()}|$sp|$e"
+    }
 
     /** CB weather: 7 days of (condition, max, min) plus current temperature; city on 34f1. */
     fun weather(days: List<Triple<Int, Int, Int>>, current: Int): List<ByteArray> {
@@ -119,7 +124,8 @@ object Protocol {
         if (m.size < 10 || m[0] != 0x7E.toByte() || m[1] != 1.toByte()) return null
         fun on(i: Int) = m[i].toInt() != 0
         return dev.openwear.s100.service.Hub.WatchSettings(on(2), on(3), on(4), on(5), m[6].toInt(), on(7), on(8),
-            m[9].toInt() and 0xFF, if (m.size > 10) m[10].toInt() and 3 else null)
+            m[9].toInt() and 0xFF, if (m.size > 10) m[10].toInt() and 3 else null,
+            if (m.size > 11) on(11) else null)
     }
 
     fun bytes(vararg v: Int) = ByteArray(v.size) { v[it].toByte() }

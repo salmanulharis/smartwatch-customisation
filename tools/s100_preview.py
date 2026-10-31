@@ -66,6 +66,8 @@ class Preview:
         self._pending: int | None = None
         for a in SLIDES:
             mu.hook_add(UC_HOOK_CODE, self._on_slide, begin=a, end=a)
+        self.syms = self._ext_symbols(fw)
+        self.t_p = self.syms.get("t_p")
         self.set_data(data or {})
         self._run(lambda: self.sim.enter(self.desc[FACE]))
 
@@ -107,6 +109,29 @@ class Preview:
         for a, v in pokes.items():
             sim.mu.mem_write(a, bytes([v & 0xFF]))
         sim.mu.mem_write(SET + 0x14, struct.pack("<I", int(d.get("steps", 6842))))
+        # from r1341 our settings are a record (ext.c t_p), not the stock bytes 0x2BC-0x2BF
+        if self.t_p:
+            rec = sim.call(self.t_p) + 4                     # prefs_t: magic, wake, aod, dock, haptic_off
+            sim.mu.mem_write(rec + 1, bytes([1 if d.get("aod") else 0]))
+
+    def _ext_symbols(self, fw: bytes) -> dict:
+        """Symbols of firmware/s100_ext/build/ext.elf, only if that build is the one in `fw` (its .tail
+        bytes are in the image); else {} (an older image: the legacy settings bytes still apply)."""
+        build = ROOT / "firmware" / "s100_ext" / "build"
+        tail = build / "tail.bin"
+        if not tail.exists():
+            return {}
+        t = tail.read_bytes()
+        off = 0x008974D0 - S.FW_BASE
+        if fw[off:off + len(t)] != t:
+            return {}
+        import subprocess
+        nm = Path(r"C:\Program Files (x86)\Arm GNU Toolchain arm-none-eabi\14.2 rel1\bin\arm-none-eabi-nm.exe")
+        try:
+            out = subprocess.run([str(nm), str(build / "ext.elf")], capture_output=True, text=True, timeout=20).stdout
+        except Exception:  # noqa: BLE001
+            return {}
+        return {l.split()[2]: int(l.split()[0], 16) for l in out.splitlines() if len(l.split()) == 3}
 
     # ---- input
     def _cur(self) -> int:
@@ -145,6 +170,19 @@ class Preview:
             if fn:
                 self._run(lambda: self.sim.call(fn, 1 if long else 2, 1))
 
+    def message(self, text: str) -> None:
+        """A phone message as the watch receives it (C5 notification text, UTF-16BE, 80 chars):
+        NAV|... frames, CFG|... settings, or a plain notification. Needs the matching ext.elf."""
+        nav_check = self.syms.get("nav_check")
+        if not nav_check:
+            raise ValueError("messages need the build this image came from (firmware/s100_ext/build)")
+        with self.lock:
+            self.off = False
+            t = text.encode("utf-16-be")[:160]
+            self.sim.mu.mem_write(0x0021A800, bytes([len(t)]) + t)
+            self.events.append("msg " + text[:40])
+            self._run(lambda: self.sim.call(nav_check, 0x0021A800))
+
     def timeout(self) -> None:
         """The screen-off timer firing (always-on display when enabled, else screen off)."""
         with self.lock:
@@ -181,4 +219,5 @@ class Preview:
         with self.lock:
             return {"screen": "screen off" if self.off else self.names.get(self._cur(), hex(self._cur())),
                     "events": self.events[-12:], "firmware": self.fw_rel, "ui": self.ui_rel,
+                    "messages": bool(self.syms.get("nav_check")),
                     "screens": sorted(self.desc)}

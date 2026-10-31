@@ -24,9 +24,14 @@ typedef struct {
     uint32_t magic;
     uint8_t  nav_dir, ws_dirty, pad[2];
     uint16_t nav_age;
-    char nav_dist[12], nav_street[40], nav_speed[16], nav_eta[24];
+    char nav_dist[12], nav_street[48], nav_speed[16], nav_eta[24];
     /* text widgets keep a pointer to their string until the next build: strings must live here */
-    char nav_num[12], nav_line[44];
+    char nav_num[12], nav_line[44], nav_s1[44], nav_s2[44], nav_s3[44], nav_time[12];
+    uint8_t nav_min, nav_alerted;
+    char sp_time[8], sp_val[4];
+    uint32_t nav_key;                             /* manoeuvre identity for the turn alert */
+    /* our settings (record at flash 0x97A2D0, loaded on first use after boot: t_p) */
+    struct { uint32_t magic; uint8_t wake, aod, dock, haptic_off; uint8_t rsv[8]; } p;
     char clk_date[24], clk_time[8], clk_wx[32], clk_bat[20], clk_hh[4], clk_mm[4];
     uint8_t dock_mode, dock_auto;
     char rx[84];                                  /* last received message as ASCII */
@@ -37,9 +42,22 @@ typedef struct {
     char qs_bat[4], qs_day[4];
     uint32_t pref_magic, pref_sum;                /* last saved user preferences (t_prefs_*) */
     uint8_t dim_pending, ws_page;
+    char br_clk[8], br_left[8], br_min[4];
+    uint32_t br_t0;                               /* Breathe: clock second the exercise started */
+    uint8_t br_on;
 } state_t;
 #define ST ((state_t *)0x0021B000u)      /* free static RAM between .bss end and the heap */
 #define MAGIC 0x53315845u
+
+/* our settings, in our own record (see t_p / t_save_settings at the end) */
+typedef struct { uint32_t magic; uint8_t wake, aod, dock, haptic_off; uint8_t rsv[8]; } prefs_t;
+prefs_t *t_p(void);
+#define S_WAKE       (t_p()->wake)        /* bit0 touch to wake ON, bit1 button to wake OFF, bits 4-5
+                                             always-on backlight level 0 (dimmest) - 3, bit 6 turn alerts OFF */
+#define S_AOD        (t_p()->aod)         /* 1 = always-on display instead of screen off */
+#define S_DOCK       (t_p()->dock)        /* charging screen style 0-3 */
+#define S_HAPTIC_OFF (t_p()->haptic_off)  /* tap vibration, 0 = on */
+#define AOD_LEVEL    ((S_WAKE >> 4) & 3)
 
 /* 3-letter names packed in one string each (no pointer tables: code space is tight) */
 static const char WEEKDAYS[] = "SunMonTueWedThuFriSat";
@@ -48,8 +66,6 @@ static const char MONTHS[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
 #define MONTH_NOW (MONTHS + 3 * ((S_MONTH + 11) % 12))
 
 static char *put3(char *d, const char *s) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 0; return d + 3; }
-static const uint32_t NAV_ARROW[8] = {IMG_NAV0, IMG_NAV1, IMG_NAV2, IMG_NAV3,
-                                      IMG_NAV4, IMG_NAV5, IMG_NAV6, IMG_NAV7};
 
 /* ------------------------------------------------------------------ small helpers */
 static int slen(const char *s) { int n = 0; while (s[n]) n++; return n; }
@@ -194,27 +210,14 @@ static int weather_icon_index(void) {                 /* name order: sun, moon, 
 static uint32_t weather_icon(void) { return WX_ICON[weather_icon_index()]; }
 
 void t_aod_body(inst_t *in);
+void t_charge_body(inst_t *in);
 void aod_dim(int on);
 
 static void dock_body(inst_t *in) {
     int n = 0, style = ST->dock_mode;
     char *p;
     time_strings();
-    if (style == 2) {                                   /* charging face */
-        int lvl = (S_BATTERY + 5) / 10, w;
-        if (lvl > 10) lvl = 10;
-        n += add_image(W(in, n), RING[lvl], 32, 22, 176, 176);
-        n += add_image(W(in, n), IMG_BOLT, 100, 46, 40, 40);
-        put_u(ST->clk_bat, S_BATTERY, 1);
-        w = slen(ST->clk_bat) * DW;
-        n = put_big(in, n, ST->clk_bat, 112 - w / 2, 84, DIG_BOLD_W);
-        n += text(in, n, "%", 112 + w / 2 + 2, 200, 140, WHITE, 2);
-        p = put(ST->clk_time, ST->clk_hh);
-        p = put(p, ":");
-        put(p, ST->clk_mm);
-        n += text(in, n, ST->clk_time, 0, 240, 222, GREY, 1);       /* under the ring (ends at 198) */
-        return;
-    }
+    if (style == 2) { t_charge_body(in); return; }      /* charging face */
     if (style == 1) { t_aod_body(in); return; }           /* always-on display */
     /* dock */
     n = put_big(in, n, ST->clk_hh, 14, 30, DIG_BOLD_W);
@@ -273,7 +276,7 @@ void charger_change(int st) {
     if (CHARGING) {
         int s = dock_setting();
         if (s != 3) { ST->dock_auto = 1; ST->dock_mode = (uint8_t)s; gui_switch(D_CLOCK); return; }
-        if (cur == D_CLOCK) return;
+        return;                                                  /* "Nothing": keep the current screen */
     } else if (cur == D_CLOCK && (!ST->dock_auto || (ST->dock_mode == 1 && S_AOD == 1))) {
         return;                                    /* opened by hand, or always-on: stay as it is */
     }
@@ -281,50 +284,30 @@ void charger_change(int st) {
 }
 
 /* ================================================================== navigation */
-static void nav_body(inst_t *in) {
-    int n = 0, k, digits = 0;
-    char *num = ST->nav_num, *p;
-    const char *unit;
-    if (ST->magic != MAGIC) return;
-    /* arrow 4-100, distance digits 100-184, unit 184-208, street 212-236, speed / ETA 240-264 */
-    n += add_image(W(in, n), NAV_ARROW[ST->nav_dir & 7], 72, 4, 96, 96);
-    for (k = 0; ST->nav_dist[k] && k < 4 &&
-                ((ST->nav_dist[k] >= '0' && ST->nav_dist[k] <= '9') || ST->nav_dist[k] == '.'); k++)
-        num[digits++] = ST->nav_dist[k];
-    num[digits] = 0;
-    unit = ST->nav_dist + k;
-    while (*unit == ' ') unit++;
-    if (digits) {
-        n = put_big(in, n, num, (240 - digits * DW) / 2, 100, DIG_BOLD_W);
-        n += text(in, n, unit, 0, 240, 184, GREY, 1);
-    } else {
-        n += text(in, n, ST->nav_dist, 0, 240, 140, WHITE, 1);
-    }
-    n += text(in, n, ST->nav_street, 12, 228, 212, WHITE, 1);
-    p = put(ST->nav_line, ST->nav_speed);
-    if (ST->nav_speed[0] && ST->nav_eta[0]) p = put(p, "  ");
-    put(p, ST->nav_eta);
-    n += text(in, n, ST->nav_line, 24, 216, 240, ORANGE, 1);
-}
+void t_nav_body(inst_t *in);
 
-void nav_build(inst_t *in, int arg) { (void)arg; if (begin_build(in, D_NAV)) nav_body(in); }
+void nav_build(inst_t *in, int arg) { (void)arg; if (begin_build(in, D_NAV)) t_nav_body(in); }
 void nav_enter(int a, int b) { (void)a; (void)b; enter(D_NAV, "navigation", 1000); }
 void nav_exit(void) { leave(D_NAV); }
 void nav_touch(uint8_t *evt) { touch(D_NAV, evt, 0, D_FACE); }
 void nav_key(int cls, int k) { key(cls, k, D_FACE); }
 void nav_event(const uint32_t *msg) {
     int t = event_type(D_NAV, msg);
-    if (t == 1) { os_timer_restart(TIMER_OFF, 0x7FFFFFFFu); return; }
+    if (t == 1) { os_timer_stop(TIMER_OFF); return; }    /* stays on while navigating */
     if (t != 2) return;
-    if (ST->magic == MAGIC && ++ST->nav_age > NAV_TIMEOUT_S) { ST->magic = 0; gui_switch(D_FACE); }
+    if (ST->magic == MAGIC && ++ST->nav_age > NAV_TIMEOUT_S) { ST->magic = 0; gui_switch(D_FACE); return; }
+    if (ST->nav_min != S_MIN) refresh(D_NAV);          /* the clock at the top */
 }
 
-/* ASCII view of the received UTF-16BE text (non-ASCII -> '?') */
+/* ASCII view of the received UTF-16BE text. Map apps put no-break / thin spaces between number and
+ * unit ("2.5<U+00A0>km") and typographic dashes, dots and quotes in street names: those become their
+ * ASCII forms (t_ascii_char); anything else outside ASCII becomes '?'. */
+char t_ascii_char(unsigned c);
 static void ascii(const uint8_t *buf, char *out, int cap) {
     int len = buf[0], i, n = 0;
     if (len > 160) len = 160;
     for (i = 0; 2 * i + 1 < len && n < cap - 1; i++)
-        out[n++] = buf[1 + 2 * i] ? '?' : (char)buf[2 + 2 * i];
+        out[n++] = t_ascii_char((unsigned)(buf[1 + 2 * i] << 8 | buf[2 + 2 * i]));
     out[n] = 0;
 }
 
@@ -337,9 +320,11 @@ void t_config(const char *s);
 
 /* Called from the C5 notification handler hook with the received text (u8 length, UTF-16BE).
  * Returns 1 if it was one of our messages (then the notification is not stored or shown). */
+uint8_t t_nav_dir(char c);
+void t_nav_alert(void);
 int nav_check(const uint8_t *buf) {
     char *t = ST->rx, *field[5];
-    int i, f = 0, used = 0, cap[5] = {2, 12, 40, 16, 24};
+    int i, f = 0, used = 0, cap[5] = {2, 12, 48, 16, 24};
     char *dst = 0, dir = 'S';
     ascii(buf, t, sizeof ST->rx);
     if (starts(t, "CFG|")) { t_config(t + 4); return 1; }
@@ -356,8 +341,8 @@ int nav_check(const uint8_t *buf) {
         if (used < cap[f] - 1) { *dst++ = c; used++; }
     }
     if (dst) *dst = 0;
-    ST->nav_dir = (uint8_t)(dir == 'L' ? 1 : dir == 'R' ? 2 : dir == 'l' ? 3 : dir == 'r' ? 4 :
-                            dir == 'U' ? 5 : dir == 'A' ? 6 : dir == 'O' ? 7 : 0);
+    ST->nav_dir = t_nav_dir(dir);
+    t_nav_alert();
     ST->nav_age = 0;
     ST->magic = MAGIC;
     if (CUR_SCREEN == D_NAV && DISPLAY_ON == 1) refresh(D_NAV);
@@ -490,11 +475,13 @@ static int aod_dots(inst_t *in, int n, const char *s, int x, int y, const uint32
     return n;
 }
 
-/* backlight for the always-on screen: AOD_LEVEL 0-3 -> 15/14/13/12 driver pulses. backlight_apply
- * (0x83C2CC) sends 16 - S_BRIGHT * 13 / 100 pulses to the one-wire LED driver (more = dimmer, 15 the
- * dimmest); stock resets S_BRIGHT < 25 to 50, which tools/s100_ext.py relaxes to < 1 so the two
- * dimmest steps are reachable. The saved brightness is put back right after. */
-static const uint8_t AOD_PWM[4] = {5, 20, 28, 36};
+/* backlight for the always-on screen: AOD_LEVEL 0-3 (Min, Low, Mid, High) -> n = 14/13/12/11.
+ * backlight_apply (0x83C2CC) computes n = 16 - S_BRIGHT * 13 / 100 and then sends 1 + n falling edges
+ * to the one-wire LED driver (more = dimmer). The driver has 16 steps and wraps after the 16th edge,
+ * so n = 15 is the BRIGHTEST (the old "Min" bug) and n = 14 the dimmest; s100_ext.py also caps the
+ * stock clamp at 14. Stock resets S_BRIGHT < 25 to 50; relaxed to < 16 (still covers our values).
+ * The saved brightness is put back right after. */
+static const uint8_t AOD_PWM[4] = {20, 28, 36, 44};
 void aod_dim(int on) {
     if (on) {
         uint8_t b = S_BRIGHT;
@@ -538,6 +525,10 @@ static int t_touch_on(void) { return (S_WAKE & 1) != 0; }
 static int t_button_on(void) { return (S_WAKE & 2) == 0; }
 
 void t_set(char key, int on) {
+    if (key == 'n') {                                  /* navigation turn alerts (bit 6 = off) */
+        S_WAKE = (uint8_t)(on ? (S_WAKE & ~0x40) : (S_WAKE | 0x40));
+        return;
+    }
     if (key == 'l') {                                  /* always-on backlight level 0-3 */
         S_WAKE = (uint8_t)((S_WAKE & ~0x30) | ((on & 3) << 4));
         if (CUR_SCREEN == D_CLOCK && ST->dock_mode == 1) aod_dim(1);   /* live while it shows */
@@ -573,6 +564,7 @@ static int t_get(char key) {
     case 'b': return t_button_on();
     case 'h': return S_12H != 0;
     case 'l': return AOD_LEVEL;
+    case 'n': return (S_WAKE & 0x40) == 0;
     default:  return !S_HAPTIC_OFF;
     }
 }
@@ -584,19 +576,20 @@ void t_report(void) {
     r[2] = (uint8_t)t_get('a'); r[3] = (uint8_t)t_get('t'); r[4] = (uint8_t)t_get('r');
     r[5] = (uint8_t)t_get('b'); r[6] = (uint8_t)dock_setting(); r[7] = (uint8_t)t_get('h');
     r[8] = (uint8_t)t_get('v'); r[9] = S_BATTERY; r[10] = (uint8_t)AOD_LEVEL;
-    ble_notify(r, 11);
+    r[11] = (uint8_t)t_get('n');
+    ble_notify(r, 12);
 }
 
 /* "CFG|get", "CFG|aod=1", "CFG|tw=0", "CFG|rw=1", "CFG|bw=1", "CFG|h12=0", "CFG|vib=1",
- * "CFG|ab=N" (always-on brightness 0-3), "CFG|dock=N" (0-3), "CFG|show=N" (open the dock now,
+ * "CFG|ab=N" (always-on brightness 0-3), "CFG|na=0/1" (navigation turn alerts), "CFG|dock=N" (0-3), "CFG|show=N" (open the dock now,
  * style 0-2); several may be joined by '|' */
-static const char *const T_TAGS[6] = {"aod=", "tw=", "rw=", "bw=", "h12=", "vib="};
-static const char T_TAG_KEY[6] = {'a', 't', 'r', 'b', 'h', 'v'};
+static const char *const T_TAGS[7] = {"aod=", "tw=", "rw=", "bw=", "h12=", "vib=", "na="};
+static const char T_TAG_KEY[7] = {'a', 't', 'r', 'b', 'h', 'v', 'n'};
 
 void t_config(const char *s) {
     int changed = 0, i;
     for (; *s; s++) {
-        for (i = 0; i < 6; i++) {
+        for (i = 0; i < 7; i++) {
             int n = slen(T_TAGS[i]);
             if (starts(s, T_TAGS[i]) && (s[n] == '0' || s[n] == '1')) { t_set(T_TAG_KEY[i], s[n] == '1'); changed = 1; }
         }
@@ -628,13 +621,13 @@ void t_clock_key(int cls, int k) {
 
 void t_dock_timeout(void) {                            /* timer 1 on the dock screen */
     t_prefs_check();
-    if (ST->dock_mode == 1) { os_timer_restart(TIMER_OFF, 0x7FFFFFFFu); return; }
+    if (ST->dock_mode == 1) { os_timer_stop(TIMER_OFF); return; }   /* always-on: no timeout */
     if (S_AOD == 1) {
         ST->dock_mode = 1;
         ST->last_min = 0xFF;
         raise_reset();
         aod_dim(1);
-        os_timer_restart(TIMER_OFF, 0x7FFFFFFFu);
+        os_timer_stop(TIMER_OFF);
         refresh(D_CLOCK);
         return;
     }
@@ -737,18 +730,19 @@ void t_aod_body(inst_t *in) {
 /* ---- watch settings screen (FactoryTpTest slot): two pages, swipe up / down between them
  *   Display: Always-on, Show always-on (only while always-on is enabled), AOD brightness,
  *            12-hour time, Tap vibration
- *   Wake:    Tap to wake, Raise to wake, Press to wake                                       */
+ *   Wake & alerts: Tap to wake, Raise to wake, Press to wake, Turn alerts (navigation)       */
 static const char T_WS_PAGE0[5] = {'a', 's', 'l', 'h', 'v'};
-static const char T_WS_PAGE1[3] = {'t', 'r', 'b'};
-static const char T_WS_ALL[8] = {'a', 's', 'l', 'h', 'v', 't', 'r', 'b'};
+static const char T_WS_PAGE1[4] = {'t', 'r', 'b', 'n'};
+static const char T_WS_ALL[9] = {'a', 's', 'l', 'h', 'v', 't', 'r', 'b', 'n'};
 /* font 0 is ~11 px per capital / 10 per small letter; the label box is 150 px (x 20-170) */
-static const char *const T_WS_LABEL[8] = {"Always-on", "Show always-on", "AOD brightness", "12-hour time",
-                                          "Tap vibration", "Tap to wake", "Raise to wake", "Press to wake"};
+static const char *const T_WS_LABEL[9] = {"Always-on", "Show always-on", "AOD brightness", "12-hour time",
+                                          "Tap vibration", "Tap to wake", "Raise to wake", "Press to wake",
+                                          "Turn alerts"};
 static const char *const T_LEVEL[4] = {"Min", "Low", "Mid", "High"};
 
 static int t_ws_rows(char *keys) {                     /* keys of the rows shown on this page */
     int i, n = 0;
-    if (ST->ws_page) { for (i = 0; i < 3; i++) keys[n++] = T_WS_PAGE1[i]; return n; }
+    if (ST->ws_page) { for (i = 0; i < 4; i++) keys[n++] = T_WS_PAGE1[i]; return n; }
     for (i = 0; i < 5; i++)
         if (T_WS_PAGE0[i] != 's' || S_AOD == 1) keys[n++] = T_WS_PAGE0[i];
     return n;
@@ -779,7 +773,7 @@ void t_ws_build(inst_t *in, int arg) {
     (void)arg;
     if (!begin_build(in, D_WATCHSET)) return;
     rows = t_ws_rows(keys);
-    n += text(in, n, ST->ws_page ? "Wake  2/2" : "Display  1/2", 0, 240, 10, GREY, 1);
+    n += text(in, n, ST->ws_page ? "Wake & alerts  2/2" : "Display  1/2", 0, 240, 10, GREY, 1);
     for (i = 0; i < rows; i++) {
         int y = 44 + 46 * i, v = t_get(keys[i]);
         const char *val = v ? "On" : "Off";
@@ -810,7 +804,7 @@ void t_ws_touch(uint8_t *evt) {
         if (ST->ws_page != page) { ST->ws_page = page; refresh(D_WATCHSET); }
         return;
     }
-    touch(D_WATCHSET, evt, ST->ws_page ? 3 : 5, D_FACE);
+    touch(D_WATCHSET, evt, ST->ws_page ? 4 : 5, D_FACE);
 }
 void t_ws_key(int cls, int k) { key(cls, k, D_FACE); }
 void t_ws_event(const uint32_t *msg) {
@@ -868,14 +862,16 @@ void t_qp_status(inst_t *in) {
  * real change. Battery < 3 %: no flash write (brown-out risk), as stock. */
 static const uint16_t T_PREFS[][2] = {   /* {offset, length} in the settings block */
     {0x32, 1}, {0x64, 3}, {0xEE, 14}, {0x11C, 1}, {0x188, 1}, {0x1A4, 3}, {0x1BA, 2}, {0x1F5, 1},
-    {0x220, 1}, {0x2BC, 4}, {0x2CC, 2},
+    {0x220, 1}, {0x2CC, 2},
 };
 #define PREF_MAGIC 0x50524546u
 
 static uint32_t t_prefs_sum(void) {
     uint32_t h = 2166136261u, i, k;
+    const uint8_t *p = &t_p()->wake;
     for (i = 0; i < sizeof T_PREFS / sizeof T_PREFS[0]; i++)
         for (k = 0; k < T_PREFS[i][1]; k++) h = (h ^ U8(SETTINGS + T_PREFS[i][0] + k)) * 16777619u;
+    for (k = 0; k < 4; k++) h = (h ^ p[k]) * 16777619u;   /* our record */
     return h;
 }
 
@@ -894,4 +890,470 @@ void t_prefs_check(void) {
 void t_power_off(void) {
     t_prefs_check();
     power_off_prep();
+}
+
+/* ---- navigation screen (D_NAV)
+ * Arrow, big distance (unit beside it when it fits), street on up to two lines, speed / ETA on one.
+ * Text is measured with the stock font-0 width table, broken at spaces / '/' / '-' and cut with "..."
+ * so nothing wraps on its own into the next line (the cause of the overlapping street / ETA). */
+#define FONT0_W 0x0088E38Cu                            /* advance of chars 0x20-0x7F (stock table) */
+#define NAV_TEXT_W 216                                 /* street lines: x 12-228 */
+/* direction letters (NAV|<dir>|...) in arrow-table order:
+ * straight, left, right, slight L / R, U-turn, arrive, roundabout, sharp L / R, keep L / R, merge,
+ * exit L / R, U-turn to the right (left-hand traffic) */
+static const char NAV_DIRS[17] = "SLRlrUAO<>kKMeEu";
+
+uint8_t t_nav_dir(char c) {
+    int i;
+    for (i = 0; i < 16; i++) if (NAV_DIRS[i] == c) return (uint8_t)i;
+    return 0;
+}
+
+char t_ascii_char(unsigned c) {
+    if (c >= 0x20 && c < 0x7F) return (char)c;
+    if (c == 0xA0 || (c >= 0x2000 && c <= 0x200B) || c == 0x202F) return ' ';
+    if ((c >= 0x2010 && c <= 0x2015) || c == 0x2212) return '-';
+    if (c == 0x2018 || c == 0x2019) return 0x27;
+    if (c == 0x201C || c == 0x201D) return '"';
+    if (c == 0xB7 || c == 0x2022 || c == 0x2026) return '.';
+    return '?';
+}
+
+static int t_cw(char c) { return (c >= 0x20 && c < 0x7F) ? U8(FONT0_W + (uint8_t)(c - 0x20)) : 12; }
+static int t_tw(const char *s) { int w = 0; while (*s) w += t_cw(*s++); return w; }
+
+static void t_copy(char *dst, const char *src, int n) {   /* n chars, trailing spaces dropped */
+    while (n > 0 && src[n - 1] == ' ') n--;
+    while (n-- > 0) *dst++ = *src++;
+    *dst = 0;
+}
+
+/* One line of src into dst, at most `max` px wide. Breaks after the last space, '/', '-' or ','
+ * that fits (else mid-word); `last`: no further line, so cut and end with "...".
+ * Returns how many chars of src were used. */
+static int t_fit(const char *src, char *dst, int max, int last) {
+    int i, w = 0, brk = 0, dots = 3 * t_cw('.');
+    for (i = 0; src[i]; i++) {
+        int cw = t_cw(src[i]);
+        if (w + cw > max) break;
+        w += cw;
+        if (src[i] == ' ' || src[i] == '/' || src[i] == '-' || src[i] == ',') brk = i + 1;
+    }
+    if (!src[i]) { t_copy(dst, src, i); return i; }
+    if (last) {
+        while (i > 0 && w + dots > max) w -= t_cw(src[--i]);
+        t_copy(dst, src, i);
+        put(dst + slen(dst), "...");
+        return slen(src);
+    }
+    if (brk) i = brk;
+    t_copy(dst, src, i);
+    return i;
+}
+
+/* Layout (240 x 280): clock 8-32, arrow 34-130, distance 132-176 (bold 32 x 44 digits, unit beside),
+ * street on up to two lines from 180, speed / ETA after it (ends <= 258). Without a distance the block
+ * moves up; with the unit below the digits the street keeps one line. */
+#define ND_W 32                                        /* navigation distance digits (s_navd*) */
+#define ND_H 44
+#define ND_ADV 28                                      /* digit step (the 32 px frames have side bearing) */
+#define ND_DOT 14                                      /* '.' cell */
+static int t_nd_w(const char *s) {
+    int w = 0;
+    for (; *s; s++) w += *s == '.' ? ND_DOT : ND_ADV;
+    return w + (ND_W - ND_ADV);                        /* the last frame is drawn whole */
+}
+static int t_nd(inst_t *in, int n, const char *s, int x, int y) {
+    for (; *s; s++) {
+        if (*s == '.') { n += add_image(W(in, n), NAVD[10], x - (ND_W - ND_DOT) / 2, y, ND_W, ND_H); x += ND_DOT; }
+        else { n += add_image(W(in, n), NAVD[*s - '0'], x, y, ND_W, ND_H); x += ND_ADV; }
+    }
+    return n;
+}
+
+void t_nav_body(inst_t *in) {
+    int n = 0, k, digits = 0, two, y, wnum, wunit, beside;
+    unsigned h = S_HOUR;
+    char *num = ST->nav_num, *p;
+    const char *unit, *rest;
+    if (ST->magic != MAGIC) return;
+    for (k = 0; ST->nav_dist[k] && k < 5; k++) {          /* "2.5 km", "1,2 km", "800 m" */
+        char c = ST->nav_dist[k];
+        if (c == ',') c = '.';
+        if ((c < '0' || c > '9') && c != '.') break;
+        num[digits++] = c;
+    }
+    num[digits] = 0;
+    unit = ST->nav_dist + k;
+    while (*unit == ' ') unit++;
+    wunit = t_tw(unit);
+    wnum = t_nd_w(num);
+    beside = digits && wnum + 6 + wunit <= 228;
+    /* street: up to two lines (one when the unit needs its own line) */
+    rest = ST->nav_street + t_fit(ST->nav_street, ST->nav_s1, NAV_TEXT_W, digits && !beside);
+    while (*rest == ' ') rest++;
+    ST->nav_s2[0] = 0;
+    if (*rest && !(digits && !beside)) t_fit(rest, ST->nav_s2, NAV_TEXT_W, 1);
+    two = ST->nav_s2[0] != 0;
+    p = put(ST->nav_line, ST->nav_speed);
+    if (ST->nav_speed[0] && ST->nav_eta[0]) p = put(p, "  ");
+    put(p, ST->nav_eta);
+    t_fit(ST->nav_line, ST->nav_s3, 196, 1);
+    /* clock */
+    if (S_12H) { h %= 12; if (!h) h = 12; }
+    p = put_u(ST->nav_time, h, 1);
+    p = put(p, ":");
+    put_u(p, S_MIN, 2);
+    ST->nav_min = S_MIN;
+    n += text(in, n, ST->nav_time, 0, 240, 8, WHITE, 1);
+    /* arrow: centred in the space the rest leaves */
+    y = digits ? 34 : (two ? 44 : 52);
+    n += add_image(W(in, n), NAV_IMG[ST->nav_dir & 15], 72, y, 96, 96);
+    y += 98;
+    if (digits) {
+        int x = (240 - wnum - (beside ? 6 + wunit : 0)) / 2;
+        n = t_nd(in, n, num, x, y);
+        if (beside) n += text(in, n, unit, x + wnum + 6, 240, y + ND_H - 26, GREY, 2);
+        y += ND_H + 4;
+        if (!beside) { n += text(in, n, unit, 0, 240, y - 2, GREY, 1); y += 24; }
+    } else if (ST->nav_dist[0]) {                          /* a distance that is not a number */
+        t_fit(ST->nav_dist, ST->nav_num, NAV_TEXT_W, 1);
+        n += text(in, n, ST->nav_num, 12, 228, y, GREY, 1);
+        y += 26;
+    }
+    if (ST->nav_s1[0]) { n += text(in, n, ST->nav_s1, 12, 228, y, WHITE, 1); y += 24; }
+    if (two) { n += text(in, n, ST->nav_s2, 12, 228, y, WHITE, 1); y += 24; }
+    if (ST->nav_s3[0]) text(in, n, ST->nav_s3, 22, 218, y + 6, ORANGE, 1);
+}
+
+/* ---- navigation turn alert: two short pulses once per manoeuvre, ~12 s before it
+ * Distance in metres from the frame (km / m / mi / ft / yd), speed from "48 km/h" / "30 mph": alert
+ * when the turn is within speed x 12 s (60-500 m), or 150 m without a speed. A manoeuvre = direction +
+ * street; it alerts once, and again only after the distance grew well past the alert range (a
+ * re-route). Not for "straight"; off with "Turn alerts" (S_WAKE bit 6). Stock vibration rules (DND,
+ * battery) apply through motor_vibrate. */
+static const uint16_t NAV_PULSES[8] = {1, 60, 0, 90, 1, 60, 0, 0};   /* on 60 ms, off 90, on 60, stop */
+
+static unsigned t_num_x10(const char *s, const char **end) {    /* "2.5" -> 25 */
+    unsigned v = 0, frac = 0, dec = 0;
+    for (; (*s >= '0' && *s <= '9') || *s == '.' || *s == ','; s++) {
+        if (*s == '.' || *s == ',') { dec = 1; continue; }
+        if (!dec) v = v * 10 + (unsigned)(*s - '0');
+        else if (dec == 1) { frac = (unsigned)(*s - '0'); dec = 2; }
+    }
+    while (*s == ' ') s++;
+    *end = s;
+    return v * 10 + frac;
+}
+
+static unsigned t_nav_metres(void) {                  /* 0xFFFF = unknown */
+    const char *u;
+    unsigned v = t_num_x10(ST->nav_dist, &u);
+    if (u == ST->nav_dist) return 0xFFFF;
+    if (u[0] == 'k') return v * 100;                   /* km */
+    if (u[0] == 'm' && u[1] == 'i') return v * 161;    /* mi */
+    if (u[0] == 'f') return v * 3 / 100;               /* ft */
+    if (u[0] == 'y') return v * 9 / 100;               /* yd */
+    return v / 10;                                     /* m */
+}
+
+void t_nav_alert(void) {
+    const char *u;
+    unsigned d = t_nav_metres(), kmh = t_num_x10(ST->nav_speed, &u) / 10, range;
+    uint32_t key = 2166136261u;
+    const char *s = ST->nav_street;
+    if (u[0] == 'm' && u[1] == 'p') kmh = kmh * 16 / 10;   /* mph */
+    key = (key ^ (uint8_t)ST->nav_dir) * 16777619u;
+    for (; *s; s++) key = (key ^ (uint8_t)*s) * 16777619u;
+    range = kmh > 5 ? kmh * 10 / 3 : 150;              /* km/h x 12 s = km/h x 3.33 m */
+    if (range < 60) range = 60;
+    if (range > 500) range = 500;
+    if (key != ST->nav_key) { ST->nav_key = key; ST->nav_alerted = 0; }
+    else if (ST->nav_alerted && d != 0xFFFF && d > range * 2) ST->nav_alerted = 0;   /* re-route */
+    if (ST->nav_alerted || d == 0xFFFF || d > range || ST->nav_dir == 0 || (S_WAKE & 0x40)) return;
+    ST->nav_alerted = 1;
+    if (U8(MOTOR_STATE)) return;                       /* already vibrating (a call, an alarm) */
+    motor_vibrate(1, 2);                               /* keeps the stock DND / battery rules */
+    if (U8(MOTOR_STATE)) {                             /* our steps instead of the stock pattern */
+        U32(MOTOR_STATE + 0xC) = (uint32_t)NAV_PULSES;
+        motor_timer_set(60);
+    }
+}
+
+/* ---- our settings record
+ * Kept in RAM in ST->p and in flash right after the stock settings block (0x97A000 + 0x2D0): the
+ * stock save erases that 4 KB sector and writes only 0x2D0 bytes, and nothing reads past them.
+ * save_settings (0x830654) is replaced by t_save_settings, so every save -- ours, the phone's, the
+ * stock periodic / power-off ones -- writes both. Loaded on first use after boot (nothing runs at
+ * boot); before any save (the erase would lose it otherwise). No record yet (first boot after the
+ * update): the old bytes 0x2BC-0x2BF are taken over when they hold valid values, else defaults
+ * (touch to wake off, button on, AOD off and Min, dock "Dock", vibration and turn alerts on). */
+#define PREFS_FLASH (SETTINGS_FLASH + 0x2D0)
+#define PREFS_MAGIC 0x31464550u                          /* "PEF1" */
+
+prefs_t *t_p(void) {
+    prefs_t *p = (prefs_t *)&ST->p;
+    if (p->magic != PREFS_MAGIC) {
+        uint32_t i;
+        flash_read(p, PREFS_FLASH, sizeof *p);
+        if (p->magic != PREFS_MAGIC || p->aod > 1 || p->dock > 3 || p->haptic_off > 1 || (p->wake & 0x80)) {
+            const uint8_t *old = (const uint8_t *)LEGACY_PREFS;
+            int valid = old[1] <= 1 && old[2] <= 3 && old[3] <= 1 && !(old[0] & 0x80);
+            p->wake = valid ? old[0] : 0;
+            p->aod = valid ? old[1] : 0;
+            p->dock = valid ? old[2] : 0;
+            p->haptic_off = valid ? old[3] : 0;
+            for (i = 0; i < sizeof p->rsv; i++) p->rsv[i] = 0;
+        }
+        p->magic = PREFS_MAGIC;
+    }
+    return p;
+}
+
+/* replaces save_settings (b.w at 0x830654): stock block + our record, then the stock 50 ms wait */
+void t_save_settings(void) {
+    prefs_t *p = t_p();                                  /* read before the erase */
+    flash_erase(SETTINGS_FLASH, 0x20);
+    flash_write((const void *)SETTINGS, SETTINGS_FLASH, 0x2D0);
+    flash_write(p, PREFS_FLASH, sizeof *p);
+    delay_us(50000);
+}
+
+/* charger state change that turns the display off (unplugged / charge complete: bl 0x8464FA at
+ * 0x830FA8, outside the screen-off timer path): always-on instead, like the timeout and wrist down */
+void t_charger_off(void) {
+    if (S_AOD == 1 && S_BATTERY > 10 && DISPLAY_ON == 1) {
+        if (CUR_SCREEN == D_CLOCK) {
+            if (ST->dock_mode == 1) return;                  /* already always-on */
+            t_dock_timeout();
+            return;
+        }
+        aod_screen_off();
+        return;
+    }
+    screen_off();
+}
+
+/* ---- charging face (dock style 2), after the owner's reference: a 196 px ring centred on the screen
+ * (10 % steps), bolt, percentage in bold 32 x 44 digits with a small '%', "Charging..." / "Charged"
+ * inside it; a small clock above. Refreshed by the dock's 1 s tick (clock_event). */
+void t_charge_body(inst_t *in) {
+    int n = 0, lvl = S_BATTERY >= 100 ? 10 : (S_BATTERY + 5) / 10, wnum, wpct = t_tw("%"), x;
+    unsigned h = S_HOUR;
+    char *p;
+    const char *label = S_BATTERY >= 100 ? "Charged" : "Charging...";
+    if (lvl > 9 && S_BATTERY < 100) lvl = 9;           /* a full ring only when charged */
+    if (S_12H) { h %= 12; if (!h) h = 12; }
+    p = put_u(ST->clk_time, h, 1);
+    p = put(p, ":");
+    put_u(p, S_MIN, 2);
+    n += text(in, n, ST->clk_time, 0, 240, 8, GREY, 1);
+    n += add_image(W(in, n), RING[lvl], 22, 44, 196, 196);          /* centre (120, 142) */
+    n += add_image(W(in, n), IMG_BOLT, 100, 84, 40, 40);
+    put_u(ST->clk_bat, S_BATTERY > 100 ? 100 : S_BATTERY, 1);
+    wnum = t_nd_w(ST->clk_bat);
+    x = (240 - wnum - 2 - wpct) / 2;
+    n = t_nd(in, n, ST->clk_bat, x, 128);
+    n += text(in, n, "%", x + wnum + 2, 240, 148, WHITE, 2);        /* small, on the digits' baseline */
+    text(in, n, label, 0, 240, 176, GREY, 1);
+}
+
+/* a string of "-./0-9:" in the status-bar digit set (11 x 20 cells, one widget) */
+static int t_qs_str(inst_t *in, int n, const char *s, int x, int y) {
+    add_digits(W(in, n), s, slen(s), QS_DIG[3], x, y, 11, 20, (uint32_t)QS_DIG);
+    return 1;
+}
+
+/* screen-header clock, right-aligned to x 226 */
+static int t_hdr_clock(inst_t *in, int n, char *buf, int y) {
+    unsigned h = S_HOUR;
+    char *p;
+    if (S_12H) { h %= 12; if (!h) h = 12; }
+    p = put_u(buf, h, 1);
+    p = put(p, ":");
+    put_u(p, S_MIN, 2);
+    return t_qs_str(in, n, buf, 226 - 11 * slen(buf), y);
+}
+
+/* ---- SpO2 screen (BloodOxygenScreenUI) after the owner's reference
+ * The stock build still runs first: it owns the sensor state, the measure / cancel touch areas and the
+ * animation timer. Its widgets are then replaced by: header (chevron + "SpO2" image, clock), an orange
+ * card (O2 icon, BLOOD OXYGEN, halftone crescent baked in) with the reading in large black-keyed digits,
+ * and a status row below it: ring + status line + 12 progress pills.
+ *   measuring (the stock build added one of its ring frames): a 90-degree orange arc turns round the
+ *     track (2 octant pieces, one step per 500 ms timer tick), "Measuring...", pills = real progress of
+ *     the stock 60 s window (tick count 0x2142ED x timer period);
+ *   idle, no reading: grey track with an orange dot, "Tap to measure", no pills lit;
+ *   reading shown: full orange ring, "Tap to measure again", all pills lit.
+ * Reading: the sensor result the stock screen shows (0x20D154 + 0xFE, 0 = none yet). */
+#define SPO2_VALUE  U8(0x0020D154 + 0xFE)
+#define ANIM_COUNT  U32(0x0020C154 + 0xD60)
+#define ANIM_PERIOD U32(0x0020C154 + 0xD64)                /* stock timer period, ms (500) */
+#define SPO2_TICKS  U8(0x002142ED)                         /* ticks into the measurement */
+#define SPO2_FRAMES 0x0088B1C4u                            /* stock measuring ring frames (11) */
+#define SPO2_CX     14                                     /* card */
+#define SPO2_CY     60
+#define SPO2_BASE   (SPO2_CY + 94)                         /* value baseline (glyph frames end 2 px below) */
+#define SPO2_RX     20                                     /* ring */
+#define SPO2_RY     206
+
+static int t_spo2_oct(inst_t *in, int n, int k) {
+    k &= 7;
+    return add_image(W(in, n), SPO2_OCT[k], SPO2_RX + SPO2_OCTB[k][0], SPO2_RY + SPO2_OCTB[k][1],
+                     SPO2_OCTB[k][2], SPO2_OCTB[k][3]);
+}
+
+void t_spo2_build(inst_t *in, int arg) {
+    int i, k, n = 0, measuring = 0, x, lit = 0, st;
+    unsigned v = SPO2_VALUE, c, per;
+    const char *s;
+    spo2_stock_build(in, arg);
+    if (!in) return;
+    for (i = 0; i < in->cap; i++) {
+        const uint8_t *w = in->widgets[i].raw;
+        if (w[0x1D] == 2)
+            for (k = 0; k < 11; k++)
+                if (*(const uint32_t *)(w + 0xC) == U32(SPO2_FRAMES + 4u * k)) measuring = 1;
+    }
+    memclr(in->widgets, (uint32_t)in->cap * sizeof(widget_t));
+    c = ANIM_COUNT;
+    /* header: chevron + "SpO2" (one image), clock right-aligned in the status-bar digits */
+    n += add_image(W(in, n), SPO2_HEAD, 14, 22, 96, 28);
+    n += t_hdr_clock(in, n, ST->sp_time, 26);
+    /* card + reading (black-keyed glyphs on the card, baseline-aligned, proportional) */
+    n += add_image(W(in, n), SPO2_CARD, SPO2_CX, SPO2_CY, 212, 128);
+    x = SPO2_CX + 16;
+    if (v > 0 && v <= 100) {
+        put_u(ST->sp_val, v, 1);
+        for (s = ST->sp_val; *s; s++) {
+            n += add_image(W(in, n), SPO2_D[*s - '0'], x, SPO2_BASE + 2 - 50, SPO2_DW[*s - '0'], 50);
+            x += SPO2_DW[*s - '0'] + 1;
+        }
+    } else {
+        for (k = 0; k < 2; k++) {
+            n += add_image(W(in, n), SPO2_DASH, x, SPO2_BASE + 2 - 50, SPO2_DASH_W, 50);
+            x += SPO2_DASH_W + 3;
+        }
+    }
+    n += add_image(W(in, n), SPO2_PCT, x + 3, SPO2_BASE + 2 - 26, SPO2_PCT_W, 26);
+    /* status row */
+    if (measuring) {
+        n += add_image(W(in, n), SPO2_TRACK, SPO2_RX, SPO2_RY, 32, 32);
+        n += t_spo2_oct(in, n, (int)c);
+        n += t_spo2_oct(in, n, (int)c + 1);
+        per = ANIM_PERIOD;
+        lit = per ? (int)(SPO2_TICKS * per * 12u / 60000u) : 0;
+        if (lit > 12) lit = 12;
+        st = 0;
+    } else if (v) {
+        for (k = 0; k < 8; k++)
+            n += t_spo2_oct(in, n, k);
+        lit = 12;
+        st = 2;
+    } else {
+        n += add_image(W(in, n), SPO2_TRACK, SPO2_RX, SPO2_RY, 32, 32);
+        n += add_image(W(in, n), SPO2_DOT, SPO2_RX + 13, SPO2_RY, 6, 6);
+        st = 1;
+    }
+    n += add_image(W(in, n), SPO2_ST[st], 64, 204, 160, 18);
+    for (k = 0; k < 12; k++)
+        n += add_image(W(in, n), k < lit ? SPO2_SEG_ON : SPO2_SEG_OFF, 64 + 13 * k, 228, 6, 12);
+}
+
+/* ---- Breathe screen (BreathTrainingScreenUI) after the owner's reference
+ * The stock build still runs first (state, touch areas, the vibration at each exhale); its widgets
+ * are then replaced, except on the duration / pace pickers and the summary, which stay stock.
+ *   setup: header (chevron, "Breathe", clock), orange stadium with the halftone mark and a
+ *     dark dot panel, Duration and Pace cards (value from the stock settings), START; the stock touch
+ *     areas are moved onto the cards and the button;
+ *   lead-in (stock steps 0-4, 1 s each): smallest disc, "Get ready", the five step dots;
+ *   breathing: the disc follows the stock breath timer. Its phase is 22 ticks (s100_ext.py doubles the
+ *     tick rate and the count, so a phase lasts as long as stock: 11 s Slow, 8.8 s Calm, 5.5 s Fast):
+ *     ticks 0-17 inhale / exhale (eased over 20 frames), 18-21 hold. Label = the phase; under it the
+ *     time left, from the clock (the exercise total is the stock 0x20D168: 5 s lead-in + minutes);
+ *   finished (time left 0 while stock still waits for its end timer): "Well done", 0:00. */
+#define BR_RUN     U8(0x0020D154 + 0x0D)               /* exercise running */
+#define BR_STEP    U32(0x0020D154 + 0x10)              /* lead-in step 0-4, then 5 */
+#define BR_TOTAL   U32(0x0020D154 + 0x14)              /* 5 s lead-in + duration, s */
+#define BR_SUMMARY U8(0x0020D154 + 0xEE)
+#define BR_IN      U8(0x0020D970)                      /* 1 inhale, 0 exhale */
+#define BR_PACE    U8(0x0020D971)                      /* 1 Slow, 2 Calm, 3 Fast */
+#define BR_MINUTES U8(0x0020D972)
+#define BR_PICKING (U8(0x002142F0) | U8(0x002142F1))   /* duration / pace picker open */
+#define S_SEC      U8(0x0020BF1C)
+#define BR_HOLD    18                                  /* first hold tick of a phase */
+
+static int t_breath_frame(inst_t *in, int n, int lv) {
+    if (BR_BIG & (1u << lv))                            /* 170 x 170 slot, same centre */
+        return add_image(W(in, n), BR_FRAME[lv], 35, 25, 170, 170);
+    return add_image(W(in, n), BR_FRAME[lv], 60, 50, 120, 120);
+}
+
+static void t_breath_touch(void) {               /* the stock areas, found by their handlers */
+    int i;
+    for (i = 0; i < 15; i++) {
+        int16_t *a = (int16_t *)TOUCH_AREA(i);
+        uint32_t cb = *(uint32_t *)((uint8_t *)a + 8);
+        if (cb == 0x0084ABC5u) { a[0] = 16; a[1] = 210; a[2] = 208; a[3] = 48; }         /* START */
+        else if (cb == 0x0084AC45u) { a[0] = 12; a[1] = 156; a[2] = 108; a[3] = 52; }    /* duration */
+        else if (cb == 0x0084ACB7u) { a[0] = 120; a[1] = 156; a[2] = 108; a[3] = 52; }   /* pace */
+    }
+}
+
+void t_breath_build(inst_t *in, int arg) {
+    int n = 0, k, x, lv, left, el, step;
+    unsigned c, now, pace;
+    const char *s;
+    char *p;
+    breath_stock_build(in, arg);
+    if (!in || BR_PICKING || BR_SUMMARY) return;
+    memclr(in->widgets, (uint32_t)in->cap * sizeof(widget_t));
+    n += add_image(W(in, n), BR_CHEVRON, 14, 22, 11, 16);
+    n += add_image(W(in, n), BR_TITLE, 30, 20, 88, 20);
+    n += t_hdr_clock(in, n, ST->br_clk, 20);
+    if (!BR_RUN) {
+        ST->br_on = 0;
+        n += add_image(W(in, n), BR_PANEL, 70, 52, 170, 170);
+        n += add_image(W(in, n), BR_HERO, 18, 52, 170, 170);
+        n += add_image(W(in, n), BR_CARD_L, 16, 34, 170, 170);
+        n += add_image(W(in, n), BR_CARD_R, 54, 34, 170, 170);
+        put_u(ST->br_min, BR_MINUTES, 1);
+        for (x = 56, s = ST->br_min; *s; s++, x += 11)
+            n += add_image(W(in, n), BR_DIGIT[*s - '0'], x, 166, 11, 16);
+        n += add_image(W(in, n), BR_MIN, x + 3, 166, 32, 16);
+        pace = BR_PACE;
+        n += add_image(W(in, n), BR_PACE_IMG[pace >= 1 && pace <= 3 ? pace - 1 : 2], 164, 167, 46, 14);
+        n += add_image(W(in, n), BR_START, 20, 214, 200, 60);
+        t_breath_touch();
+        return;
+    }
+    /* time left: from the clock, since the first build that saw the exercise running */
+    now = S_HOUR * 3600u + S_MIN * 60u + S_SEC;
+    if (!ST->br_on) { ST->br_on = 1; ST->br_t0 = now; }
+    el = (int)((now + 86400u - ST->br_t0) % 86400u);
+    left = (int)BR_TOTAL - el;
+    if (left > (int)BR_TOTAL - 5) left = (int)BR_TOTAL - 5;
+    if (left < 0) left = 0;
+    p = put_u(ST->br_left, (unsigned)left / 60u, 1);
+    p = put(p, ":");
+    put_u(p, (unsigned)left % 60u, 2);
+    step = (int)BR_STEP;
+    c = ANIM_COUNT;
+    if (step < 5) {                                                   /* lead-in */
+        n += t_breath_frame(in, n, 0);
+        n += add_image(W(in, n), BR_LBL_READY, 51, 184, 139, 24);
+        for (k = 0; k < 5; k++)
+            n += add_image(W(in, n), k <= step ? BR_DOT_ON : BR_DOT_OFF, 92 + 12 * k, 246, 8, 8);
+    } else if (!left) {                                               /* done */
+        n += t_breath_frame(in, n, 0);
+        n += add_image(W(in, n), BR_LBL_DONE, 75, 151, 90, 90);
+    } else {
+        lv = c >= BR_HOLD ? 19 : BR_EASE[c];
+        if (!BR_IN) lv = 19 - lv;
+        n += t_breath_frame(in, n, lv);
+        if (c >= BR_HOLD) n += add_image(W(in, n), BR_LBL_HOLD, 50, 183, 140, 26);
+        else if (BR_IN) n += add_image(W(in, n), BR_LBL_IN, 81, 182, 78, 29);
+        else n += add_image(W(in, n), BR_LBL_OUT, 78, 182, 85, 29);
+    }
+    n += t_qs_str(in, n, ST->br_left, 120 - 11 * slen(ST->br_left) / 2, 214);
 }

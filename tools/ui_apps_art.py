@@ -135,38 +135,6 @@ for k, (name, fn, colour) in enumerate(APPS):
 
 
 # ---- health screens: in-place replacements (same size as stock, must fit the stock slot)
-ORANGE = (255, 90, 30)
-TRACK = (44, 44, 48)
-
-
-def spo2_ring():                                       # IMG1539 170x170 (SpO2 value sits inside)
-    im = Image.new("RGB", (170 * SS, 170 * SS), (0, 0, 0))
-    d = ImageDraw.Draw(im)
-    d.ellipse([4 * SS, 4 * SS, 166 * SS, 166 * SS], outline=TRACK, width=9 * SS)
-    # drop above the value (the value digits start at y 64 in this image)
-    cx, cy = 85 * SS, 44 * SS
-    d.ellipse([cx - 7 * SS, cy - 2 * SS, cx + 7 * SS, cy + 12 * SS], fill=ORANGE)
-    d.polygon([(cx, cy - 12 * SS), (cx + 6.4 * SS, cy + 2 * SS), (cx - 6.4 * SS, cy + 2 * SS)], fill=ORANGE)
-    return im.resize((170, 170), Image.LANCZOS)
-
-
-def measure_button():                                  # IMG1536 200x60 (re-measure)
-    """Pill + crisp (two-level) label: the stock slot is 2488 B, anti-aliased text does not fit."""
-    im = Image.new("RGB", (200 * SS, 60 * SS), (0, 0, 0))
-    ImageDraw.Draw(im).rounded_rectangle([2 * SS, 4 * SS, 198 * SS - 1, 56 * SS - 1], radius=26 * SS,
-                                         fill=(38, 38, 42))
-    im = im.resize((200, 60), Image.LANCZOS)
-    im = im.quantize(palette=G._palette([(0, 0, 0), (38, 38, 42), (19, 19, 21)]),
-                     dither=Image.Dither.NONE).convert("RGB")
-    ink = Image.new("L", (200, 60), 0)
-    d = ImageDraw.Draw(ink)
-    f = ImageFont.truetype(FONT, 19)
-    box = f.getbbox("Measure")
-    d.text(((200 - (box[2] - box[0])) / 2 - box[0], (60 - (box[3] - box[1])) / 2 - box[1]), "Measure", font=f, fill=255)
-    im.paste((245, 245, 245), (0, 0), ink.point(lambda v: 255 if v >= 110 else 0))
-    return im
-
-
 def on_black(index):
     """Stock white-on-red SpO2 digit / % frame -> white on black (the value no longer sits on a disc):
     ink = min(G, B), which is ~0 on the red background and 255 on the white digits."""
@@ -180,7 +148,8 @@ def on_black(index):
 
 
 # (a smooth heart IMG1476 does not fit its 478-byte slot; the current one stays)
-REPLACE = {1539: spo2_ring, 1536: measure_button, 1537: on_black(1537)}
+# (IMG1536 / 1539, the old SpO2 button and ring, now hold Breathe art: tools/ui_breathe_art.py)
+REPLACE = {1537: on_black(1537)}
 REPLACE.update({i: on_black(i) for i in range(1522, 1536)})        # 37x44 digits "- . / 0-9 :"
 
 
@@ -216,3 +185,209 @@ for k, n in enumerate(QS_WEEKDAYS):
 def qs_weekday_widths() -> list[int]:
     """Ink width of each weekday image (the day number follows it)."""
     return [round(word_width(n, QS_SIZE)) for n in QS_WEEKDAYS]
+
+
+# ---- SpO2 screen after the owner's reference (rev 16, "v_spo2_*", appended after everything else).
+# Geometric type (Century Gothic Bold, the closest system face to the reference), an orange card with a
+# soft vertical gradient (row-constant, so it costs nothing in the row RLE), O2 icon, letter-spaced
+# BLOOD OXYGEN and a crescent of halftone dots growing towards the right edge; below it a ring spinner,
+# a status line and a 12-pill progress bar. The value glyphs are black-keyed (transparent background,
+# near-black ink), so they sit on the gradient and the dots without boxes. Proportional digits: their
+# widths go to the firmware (spo2_widths()).
+GEO = r"C:\Windows\Fonts\GOTHICB.TTF"
+SPO2_TOP, SPO2_BOT = (255, 122, 58), (246, 82, 26)     # card gradient
+SPO2_ORANGE = (255, 98, 34)                            # spinner / pills
+SPO2_INK = (20, 20, 20)
+SPO2_DOT = (255, 214, 192)
+SPO2_WHITE = (242, 242, 242)
+SPO2_TRACK = (58, 58, 62)
+CARD_W, CARD_H = 212, 128
+VAL_H, PCT_H, DROP = 50, 26, 2                          # value glyph frames; baseline DROP px above the bottom
+VAL_PX = 62
+
+
+def _pal(cols):
+    p = Image.new("P", (1, 1))
+    p.putpalette([v for c in cols for v in c] + [0] * (768 - 3 * len(cols)))
+    return p
+
+
+def _q(im, cols):
+    return im.quantize(palette=_pal(cols), dither=Image.Dither.NONE).convert("RGB")
+
+
+def _mix(a, b, t):
+    return tuple(round(x + (y - x) * t) for x, y in zip(a, b))
+
+
+def _geo(px):
+    return ImageFont.truetype(GEO, int(px * SS))
+
+
+def _spaced(d, x, y, text, f, fill, track):
+    for ch in text:
+        d.text((x, y), ch, font=f, fill=fill)
+        x += f.getlength(ch) + track * SS
+    return x
+
+
+def spo2_card():
+    import math
+    im = Image.new("RGB", (CARD_W * SS, CARD_H * SS), (0, 0, 0))
+    grad = Image.new("RGB", (1, CARD_H))
+    for y in range(CARD_H):
+        grad.putpixel((0, y), _mix(SPO2_TOP, SPO2_BOT, y / (CARD_H - 1)))
+    grad = grad.resize((CARD_W * SS, CARD_H * SS), Image.NEAREST)
+    mask = Image.new("L", im.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, CARD_W * SS - 1, CARD_H * SS - 1], radius=24 * SS, fill=255)
+    im.paste(grad, (0, 0), mask)
+    d = ImageDraw.Draw(im)
+    # halftone crescent: dots on concentric arcs bulging to the right, larger on the outer arcs and
+    # shrinking towards the arc ends
+    cx, cy = 62, 64
+    for ring in range(6):
+        r = 76 + ring * 12.5
+        steps = int(2 * math.pi * r / 12.5)
+        for k in range(steps):
+            a = 2 * math.pi * (k + 0.5 * (ring & 1)) / steps
+            x, y = cx + r * math.cos(a), cy + r * math.sin(a)
+            if not (x > cx and x <= CARD_W - 9 and 9 <= y <= CARD_H - 9):
+                continue
+            end = min(1.0, (y - 9) / 30, (CARD_H - 9 - y) / 30)
+            rad = (0.9 + 2.6 * (ring / 5) ** 1.2) * (0.35 + 0.65 * max(0.0, end))
+            if rad < 0.7:
+                continue
+            d.ellipse([(x - rad) * SS, (y - rad) * SS, (x + rad) * SS, (y + rad) * SS], fill=SPO2_DOT)
+    # O2 icon: ring + subscript 2
+    d.ellipse([16 * SS, 14 * SS, 36 * SS, 34 * SS], outline=SPO2_INK, width=int(3 * SS))
+    d.text((38 * SS, 25 * SS), "2", font=_geo(12), fill=SPO2_INK)
+    _spaced(d, 18 * SS, 100 * SS, "BLOOD OXYGEN", _geo(11), SPO2_INK, 1.8)
+    im = im.resize((CARD_W, CARD_H), Image.LANCZOS)
+    cols = [(0, 0, 0), SPO2_INK, SPO2_DOT] + [_mix(SPO2_TOP, SPO2_BOT, t / 9) for t in range(10)]
+    cols += [_mix(SPO2_INK, SPO2_TOP, 0.5), _mix(SPO2_DOT, SPO2_TOP, 0.5), _mix(SPO2_DOT, SPO2_BOT, 0.5)]
+    return _q(im, cols)
+
+
+def _glyph(ch, px, h, ink, bg, levels, pad=1, drop=0):
+    """Black-keyed glyph frame `h` high, baseline `drop` px above the bottom (room for round overshoot),
+    ink width + pad on both sides."""
+    f = _geo(px)
+    asc = f.getmetrics()[0] + drop * SS
+    probe = Image.new("L", (3 * px * SS, h * SS), 0)
+    ImageDraw.Draw(probe).text((px * SS, h * SS - asc), ch, font=f, fill=255)
+    x0, y0, x1, _ = probe.getbbox()
+    assert y0 > 0, f"{ch!r} clipped at the top of its {h} px frame"
+    w = max(1, -(-(x1 - x0) // SS) + 2 * pad)
+    im = Image.new("RGB", (w * SS, h * SS), bg)
+    ImageDraw.Draw(im).text((px * SS - x0 + pad * SS, h * SS - asc), ch, font=f, fill=ink)
+    im = _q(im.resize((w, h), Image.LANCZOS), [_mix(bg, ink, t / (levels - 1)) for t in range(levels)])
+    # key: the background becomes pure black (transparent); the ink stays off pure black
+    im.putdata([(0, 0, 0) if p == bg else p for p in im.getdata()])
+    return im
+
+
+def spo2_value(ch, px, h):
+    return lambda: _glyph(ch, px, h, SPO2_INK, SPO2_BOT, 3, drop=DROP)
+
+
+def spo2_percent():
+    """'%' drawn geometrically (the font's own has a joining stroke and does not fit a small frame):
+    two rings and a slash, ring bottoms on the baseline (DROP px above the frame bottom)."""
+    w, h, r, t = 25, PCT_H, 5.8, 3.3
+    bg = SPO2_BOT
+    im = Image.new("RGB", (w * SS, h * SS), bg)
+    d = ImageDraw.Draw(im)
+    base = h - DROP
+    for cx, cy in ((0.6 + r, base - 23.4 + r), (w - 0.6 - r, base - r)):
+        d.ellipse([(cx - r) * SS, (cy - r) * SS, (cx + r) * SS, (cy + r) * SS], fill=SPO2_INK)
+        d.ellipse([(cx - r + t) * SS, (cy - r + t) * SS, (cx + r - t) * SS, (cy + r - t) * SS], fill=bg)
+    d.line([((w - 4.5) * SS, (base - 23.4) * SS), (4.5 * SS, base * SS)], fill=SPO2_INK, width=int(3.3 * SS))
+    im = _q(im.resize((w, h), Image.LANCZOS), [_mix(bg, SPO2_INK, k / 3) for k in range(4)])
+    im.putdata([(0, 0, 0) if p == bg else p for p in im.getdata()])
+    return im
+
+
+SPIN = 32
+SPIN_COLS = [(0, 0, 0), SPO2_TRACK, SPO2_ORANGE, SPO2_WHITE, _mix((0, 0, 0), SPO2_TRACK, 0.5),
+             _mix((0, 0, 0), SPO2_ORANGE, 0.5), _mix(SPO2_TRACK, SPO2_ORANGE, 0.5), _mix(SPO2_ORANGE, SPO2_WHITE, 0.5)]
+
+
+def _ring(col):
+    im = Image.new("RGB", (SPIN * SS, SPIN * SS), (0, 0, 0))
+    ImageDraw.Draw(im).arc([2.5 * SS, 2.5 * SS, 29.5 * SS, 29.5 * SS], 0, 360, fill=col, width=int(3.6 * SS))
+    return _q(im.resize((SPIN, SPIN), Image.LANCZOS), SPIN_COLS)
+
+
+def _octant(k):
+    """Orange ring piece for octant k (clockwise from 12 o'clock), cropped; drawn over the grey track."""
+    import math
+    im = _ring(SPO2_ORANGE)
+    keep = Image.new("L", (SPIN, SPIN), 0)
+    for y in range(SPIN):
+        for x in range(SPIN):
+            a = math.degrees(math.atan2(x + 0.5 - SPIN / 2, -(y + 0.5 - SPIN / 2))) % 360
+            if 45 * k <= a < 45 * (k + 1):
+                keep.putpixel((x, y), 255)
+    out = Image.new("RGB", (SPIN, SPIN), (0, 0, 0))
+    out.paste(im, (0, 0), keep)
+    return out, out.getbbox()
+
+
+def spo2_octant(k):
+    return lambda: _octant(k)[0].crop(_octant(k)[1])
+
+
+def spo2_octant_boxes() -> list[tuple[int, int, int, int]]:
+    """(x, y, w, h) of each octant piece inside the 32 x 32 spinner."""
+    return [(b[0], b[1], b[2] - b[0], b[3] - b[1]) for b in (_octant(k)[1] for k in range(8))]
+
+
+def spo2_dot():                         # idle: a small orange dot riding on top of the track
+    im = Image.new("RGB", (6 * SS, 6 * SS), (0, 0, 0))
+    ImageDraw.Draw(im).ellipse([0, 0, 6 * SS - 1, 6 * SS - 1], fill=SPO2_ORANGE)
+    return _q(im.resize((6, 6), Image.LANCZOS), SPIN_COLS)
+
+
+def spo2_pill(col):
+    def make():
+        im = Image.new("RGB", (6 * SS, 12 * SS), (0, 0, 0))
+        ImageDraw.Draw(im).rounded_rectangle([0, 0, 6 * SS - 1, 12 * SS - 1], radius=3 * SS, fill=col)
+        return _q(im.resize((6, 12), Image.LANCZOS), [(0, 0, 0), col, _mix((0, 0, 0), col, 0.5)])
+    return make
+
+
+def spo2_status(text):                  # letter-spaced status line, 160 x 18, black-keyed
+    def make():
+        im = Image.new("RGB", (160 * SS, 18 * SS), (0, 0, 0))
+        _spaced(ImageDraw.Draw(im), 0, 1 * SS, text, _geo(13), SPO2_WHITE, 0.9)
+        return _q(im.resize((160, 18), Image.LANCZOS), [_mix((0, 0, 0), SPO2_WHITE, t / 2) for t in range(3)])
+    return make
+
+
+def spo2_head():                        # back chevron + "SpO2" with a real subscript, 96 x 28
+    im = Image.new("RGB", (96 * SS, 28 * SS), (0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.line([(9 * SS, 6 * SS), (2.5 * SS, 13.5 * SS), (9 * SS, 21 * SS)], fill=SPO2_WHITE, width=int(2.6 * SS),
+           joint="curve")
+    f, fs = _geo(20), _geo(11)
+    d.text((22 * SS, 22 * SS - f.getmetrics()[0]), "SpO", font=f, fill=SPO2_WHITE)
+    d.text((22 * SS + f.getlength("SpO") + 1 * SS, 27 * SS - fs.getmetrics()[0]), "2", font=fs, fill=SPO2_WHITE)
+    return _q(im.resize((96, 28), Image.LANCZOS), [_mix((0, 0, 0), SPO2_WHITE, t / 3) for t in range(4)])
+
+
+SPO2_STATUS = ["Measuring...", "Tap to measure", "Tap to measure again"]
+ART.update({"v_spo2_a_card": spo2_card, "v_spo2_a_head": spo2_head})
+ART.update({f"v_spo2_b_d{k}": spo2_value(str(k), VAL_PX, VAL_H) for k in range(10)})
+ART.update({"v_spo2_c_dash": spo2_value("-", VAL_PX, VAL_H), "v_spo2_c_pct": spo2_percent})
+ART.update({"v_spo2_d_track": lambda: _ring(SPO2_TRACK), "v_spo2_d_dot": spo2_dot})
+ART.update({f"v_spo2_d_oct{k}": spo2_octant(k) for k in range(8)})
+ART.update({"v_spo2_e_seg_on": spo2_pill(SPO2_ORANGE), "v_spo2_e_seg_off": spo2_pill(SPO2_TRACK)})
+ART.update({f"v_spo2_f_st{k}": spo2_status(t) for k, t in enumerate(SPO2_STATUS)})
+
+
+def spo2_widths() -> dict:
+    """Frame widths the firmware lays out with: value digits 0-9, '-' and '%'."""
+    return {"val": [ART[f"v_spo2_b_d{k}"]().size[0] for k in range(10)],
+            "dash": ART["v_spo2_c_dash"]().size[0], "pct": ART["v_spo2_c_pct"]().size[0]}
+
+
